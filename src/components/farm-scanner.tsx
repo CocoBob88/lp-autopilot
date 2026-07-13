@@ -710,10 +710,17 @@ export function FarmScanner() {
     normalizedValue: number,
   ) {
     if (!liquidityChartDomain) return;
+    const boundedValue =
+      boundary === "lower"
+        ? Math.min(normalizedValue, Math.max(0, currentLiquidityHandle - 1))
+        : Math.max(
+            normalizedValue,
+            Math.min(1_000, currentLiquidityHandle + 1),
+          );
     const next =
       liquidityChartDomain.minimum +
       (liquidityChartDomain.maximum - liquidityChartDomain.minimum) *
-        (normalizedValue / 1_000);
+        (boundedValue / 1_000);
     if (boundary === "lower") commitLowerPrice(next);
     else commitUpperPrice(next);
   }
@@ -1551,12 +1558,9 @@ export function FarmScanner() {
                             className="liquidity-range-input lower"
                             type="range"
                             min="0"
-                            max={Math.max(0, currentLiquidityHandle - 1)}
+                            max="1000"
                             step="1"
-                            value={Math.min(
-                              lowerLiquidityHandle,
-                              Math.max(0, currentLiquidityHandle - 1),
-                            )}
+                            value={lowerLiquidityHandle}
                             disabled={rangePreset === "full"}
                             aria-label="Drag minimum price on liquidity chart"
                             onChange={(event) =>
@@ -1569,13 +1573,10 @@ export function FarmScanner() {
                           <input
                             className="liquidity-range-input upper"
                             type="range"
-                            min={Math.min(1_000, currentLiquidityHandle + 1)}
+                            min="0"
                             max="1000"
                             step="1"
-                            value={Math.max(
-                              upperLiquidityHandle,
-                              Math.min(1_000, currentLiquidityHandle + 1),
-                            )}
+                            value={upperLiquidityHandle}
                             disabled={rangePreset === "full"}
                             aria-label="Drag maximum price on liquidity chart"
                             onChange={(event) =>
