@@ -21,6 +21,7 @@
     "db:dev": "prisma migrate dev",
     "worker:indexer": "tsx src/workers/indexer.ts",
     "worker:strategy": "tsx src/workers/strategy.ts",
+    "catalog:refresh": "tsx scripts/refresh-pool-catalog.ts",
     "validate:mainnet": "tsx scripts/validate-mainnet.ts"
   },
   "dependencies": {

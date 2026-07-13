@@ -521,6 +521,30 @@ export function FarmScanner() {
     selected,
   ]);
 
+  const liquidityChartDomain = useMemo(() => {
+    if (liquidityChartData.length < 2) return null;
+    const minimum = liquidityChartData[0].price;
+    const maximum = liquidityChartData.at(-1)!.price;
+    return maximum > minimum ? { minimum, maximum } : null;
+  }, [liquidityChartData]);
+  const liquidityRangePosition = (value: number) => {
+    if (!liquidityChartDomain) return 0;
+    return Math.round(
+      Math.min(
+        1_000,
+        Math.max(
+          0,
+          ((value - liquidityChartDomain.minimum) /
+            (liquidityChartDomain.maximum - liquidityChartDomain.minimum)) *
+            1_000,
+        ),
+      ),
+    );
+  };
+  const lowerLiquidityHandle = liquidityRangePosition(displayLowerPrice);
+  const currentLiquidityHandle = liquidityRangePosition(currentDisplayPrice);
+  const upperLiquidityHandle = liquidityRangePosition(displayUpperPrice);
+
   const ilSimulation = useMemo(
     () =>
       selected && simulation
@@ -672,6 +696,19 @@ export function FarmScanner() {
       setUpperPercent(Math.min(500, Math.max(0.1, change)));
     }
     setRangePreset("custom");
+  }
+
+  function commitLiquidityChartRange(
+    boundary: "lower" | "upper",
+    normalizedValue: number,
+  ) {
+    if (!liquidityChartDomain) return;
+    const next =
+      liquidityChartDomain.minimum +
+      (liquidityChartDomain.maximum - liquidityChartDomain.minimum) *
+        (normalizedValue / 1_000);
+    if (boundary === "lower") commitLowerPrice(next);
+    else commitUpperPrice(next);
   }
 
   function resetSimulator() {
@@ -993,6 +1030,9 @@ export function FarmScanner() {
         </span>
         <span>Refresh: {data?.refreshAfterSeconds ?? 75}s</span>
         <span>TVL floor: {money(data?.minimumTvlUsd ?? 1_000, false)}</span>
+        {data?.databaseBacked && (
+          <span>Catalog: {data.catalogSize.toLocaleString()} stored pools</span>
+        )}
         {chainQuery && (
           <button
             type="button"
@@ -1369,7 +1409,9 @@ export function FarmScanner() {
                   <div className="liquidity-chart-head">
                     <div>
                       <span>Liquidity distribution</span>
-                      <strong>Initialized V3 ticks around current price</strong>
+                      <strong>
+                        Active liquidity reconstructed from onchain ticks
+                      </strong>
                     </div>
                     <div className="liquidity-chart-tools">
                       {distribution && (
@@ -1486,6 +1528,63 @@ export function FarmScanner() {
                           />
                         </AreaChart>
                       </ResponsiveContainer>
+                      {liquidityChartDomain && (
+                        <div
+                          className="liquidity-range-controls"
+                          aria-label="Position range controls"
+                        >
+                          <input
+                            className="liquidity-range-input lower"
+                            type="range"
+                            min="0"
+                            max={Math.max(0, currentLiquidityHandle - 1)}
+                            step="1"
+                            value={Math.min(
+                              lowerLiquidityHandle,
+                              Math.max(0, currentLiquidityHandle - 1),
+                            )}
+                            disabled={rangePreset === "full"}
+                            aria-label="Drag minimum price on liquidity chart"
+                            onChange={(event) =>
+                              commitLiquidityChartRange(
+                                "lower",
+                                Number(event.target.value),
+                              )
+                            }
+                          />
+                          <input
+                            className="liquidity-range-input upper"
+                            type="range"
+                            min={Math.min(1_000, currentLiquidityHandle + 1)}
+                            max="1000"
+                            step="1"
+                            value={Math.max(
+                              upperLiquidityHandle,
+                              Math.min(1_000, currentLiquidityHandle + 1),
+                            )}
+                            disabled={rangePreset === "full"}
+                            aria-label="Drag maximum price on liquidity chart"
+                            onChange={(event) =>
+                              commitLiquidityChartRange(
+                                "upper",
+                                Number(event.target.value),
+                              )
+                            }
+                          />
+                          <span
+                            className="liquidity-handle-label minimum"
+                            style={{ left: lowerLiquidityHandle / 10 + "%" }}
+                          >
+                            MIN
+                          </span>
+                          <span
+                            className="liquidity-handle-label maximum"
+                            style={{ left: upperLiquidityHandle / 10 + "%" }}
+                          >
+                            MAX
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="liquidity-chart-state">
@@ -1506,6 +1605,9 @@ export function FarmScanner() {
                       {price(displayUpperPrice)}
                     </span>
                   </div>
+                  <div className="liquidity-range-help">
+                    Drag MIN and MAX directly across the distribution.
+                  </div>
                 </div>
 
                 <div className="simulation-results">
@@ -1520,7 +1622,7 @@ export function FarmScanner() {
                     </strong>
                   </div>
                   <div>
-                    <span>In-range activity</span>
+                    <span>Recent range coverage</span>
                     <strong>
                       {percent(simulation.observedRangeActivity * 100)}
                     </strong>
@@ -1782,59 +1884,6 @@ export function FarmScanner() {
                   </div>
                 </div>
 
-                <div className="range-slider-control">
-                  <div>
-                    <span>Lower boundary</span>
-                    <b>
-                      -
-                      {(invertedQuote ? upperPercent : lowerPercent).toFixed(1)}
-                      %
-                    </b>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="95"
-                    step="0.1"
-                    value={invertedQuote ? upperPercent : lowerPercent}
-                    disabled={rangePreset === "full"}
-                    onChange={(event) => {
-                      if (invertedQuote) {
-                        setUpperPercent(Number(event.target.value));
-                      } else {
-                        setLowerPercent(Number(event.target.value));
-                      }
-                      setRangePreset("custom");
-                    }}
-                  />
-                </div>
-                <div className="range-slider-control">
-                  <div>
-                    <span>Upper boundary</span>
-                    <b>
-                      +
-                      {(invertedQuote ? lowerPercent : upperPercent).toFixed(1)}
-                      %
-                    </b>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="200"
-                    step="0.1"
-                    value={invertedQuote ? lowerPercent : upperPercent}
-                    disabled={rangePreset === "full"}
-                    onChange={(event) => {
-                      if (invertedQuote) {
-                        setLowerPercent(Number(event.target.value));
-                      } else {
-                        setUpperPercent(Number(event.target.value));
-                      }
-                      setRangePreset("custom");
-                    }}
-                  />
-                </div>
-
                 <div className="tick-summary">
                   <span>
                     Lower tick <b>{simulation.tickLower.toLocaleString()}</b>
@@ -2090,8 +2139,9 @@ export function FarmScanner() {
                   </div>
                 )}
                 <p className="compact-model-note">
-                  Projection uses recent activity and current liquidity; returns
-                  are not guaranteed.
+                  APR is the current in-range run rate: it assumes recent volume
+                  and active liquidity persist. Recent range coverage is shown
+                  separately; returns are not guaranteed.
                 </p>
                 {mintError && <div className="compact-error">{mintError}</div>}
               </aside>

@@ -14,14 +14,18 @@ import {
   type FarmToken,
 } from "@/src/domain/farms";
 import { getPublicClient } from "@/src/lib/client";
+import { databaseConfigured, prisma } from "@/src/lib/db";
 
 const refreshSeconds = 75;
 const activityWindowBlocks = 2_500n;
 const metricWindowBlocks = 20_000n;
 const minimumTvlUsd = 1_000;
 const maxCandidatePools = 360;
-const maxPoolReads = 120;
-const maxFarms = 100;
+const maxActivePoolReads = 120;
+const maxPoolReads = 160;
+const maxFarms = 140;
+const catalogSampleSize = maxPoolReads - maxActivePoolReads;
+const maxCatalogCandidates = 2_000;
 
 type SwapSample = {
   amount0: bigint;
@@ -74,6 +78,118 @@ async function mapLimit<T, R>(
     Array.from({ length: Math.min(limit, values.length) }, () => worker()),
   );
   return result;
+}
+
+async function persistPoolCatalog(pools: PoolBase[]) {
+  if (!databaseConfigured() || !pools.length) return false;
+  try {
+    const uniqueTokens = new Map<string, FarmToken>();
+    for (const pool of pools) {
+      uniqueTokens.set(pool.token0.address.toLowerCase(), pool.token0);
+      uniqueTokens.set(pool.token1.address.toLowerCase(), pool.token1);
+    }
+    await prisma.token.createMany({
+      data: [...uniqueTokens.values()].map((token) => ({
+        chainId: MAINNET_CHAIN_ID,
+        address: token.address.toLowerCase(),
+        name: token.name,
+        symbol: token.symbol,
+        decimals: token.decimals,
+      })),
+      skipDuplicates: true,
+    });
+    const storedTokens = await prisma.token.findMany({
+      where: {
+        chainId: MAINNET_CHAIN_ID,
+        address: { in: [...uniqueTokens.keys()] },
+      },
+      select: { id: true, address: true },
+    });
+    const tokenIds = new Map(
+      storedTokens.map((token) => [token.address.toLowerCase(), token.id]),
+    );
+    await prisma.pool.createMany({
+      data: pools.flatMap((pool) => {
+        const token0Id = tokenIds.get(pool.token0.address.toLowerCase());
+        const token1Id = tokenIds.get(pool.token1.address.toLowerCase());
+        if (!token0Id || !token1Id) return [];
+        return [
+          {
+            chainId: MAINNET_CHAIN_ID,
+            address: pool.poolAddress.toLowerCase(),
+            factory: mainnetManifest.factory.toLowerCase(),
+            token0Id,
+            token1Id,
+            fee: pool.fee,
+            tickSpacing: pool.tickSpacing,
+          },
+        ];
+      }),
+      skipDuplicates: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function catalogCandidates(): Promise<Array<[Address, number]>> {
+  if (!databaseConfigured()) return [];
+  try {
+    const stored = await prisma.pool.findMany({
+      where: { chainId: MAINNET_CHAIN_ID },
+      orderBy: { createdAt: "desc" },
+      take: maxCatalogCandidates,
+      select: { address: true },
+    });
+    if (!stored.length) return [];
+    const bucket = Math.floor(Date.now() / (refreshSeconds * 1_000));
+    const offset = (bucket * catalogSampleSize) % stored.length;
+    return Array.from(
+      { length: Math.min(catalogSampleSize, stored.length) },
+      (_, index) => stored[(offset + index) % stored.length],
+    ).map(
+      ({ address }, index) =>
+        [getAddress(address), catalogSampleSize - index] as [Address, number],
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function catalogStatus(fallbackSize: number) {
+  if (!databaseConfigured())
+    return { catalogSize: fallbackSize, databaseBacked: false };
+  try {
+    return {
+      catalogSize: await prisma.pool.count({
+        where: { chainId: MAINNET_CHAIN_ID },
+      }),
+      databaseBacked: true,
+    };
+  } catch {
+    return { catalogSize: fallbackSize, databaseBacked: false };
+  }
+}
+
+function mergeDefaultCandidates(
+  active: Array<[Address, number]>,
+  catalog: Array<[Address, number]>,
+) {
+  const merged = new Map<string, [Address, number]>();
+  for (const item of active.slice(0, maxActivePoolReads))
+    merged.set(item[0].toLowerCase(), item);
+  for (const item of catalog) {
+    if (merged.size >= maxPoolReads) break;
+    if (!merged.has(item[0].toLowerCase()))
+      merged.set(item[0].toLowerCase(), item);
+  }
+  for (const item of active.slice(maxActivePoolReads)) {
+    if (merged.size >= maxPoolReads) break;
+    if (!merged.has(item[0].toLowerCase()))
+      merged.set(item[0].toLowerCase(), item);
+  }
+  return [...merged.values()];
 }
 
 async function readToken(address: Address): Promise<FarmToken> {
@@ -403,6 +519,8 @@ async function buildResponse(
     )
   ).filter((pool): pool is PoolBase => pool !== null);
   resolveUsdPrices(bases);
+  await persistPoolCatalog(bases);
+  const catalog = await catalogStatus(bases.length);
   const updatedAt = new Date().toISOString();
   let farms = bases.map((pool) =>
     toOpportunity(pool, blockNumber, sampleMinutes, updatedAt),
@@ -433,8 +551,10 @@ async function buildResponse(
     refreshAfterSeconds: refreshSeconds,
     sampleMinutes,
     minimumTvlUsd,
+    catalogSize: catalog.catalogSize,
+    databaseBacked: catalog.databaseBacked,
     source:
-      "Robinhood Chain RPC · Factory-verified V3 pools · $1,000 minimum TVL · rolling activity sample",
+      "Robinhood Chain RPC · Factory-verified V3 pools · persistent catalog · rolling activity sample",
     query,
   };
 }
@@ -552,7 +672,7 @@ async function tokenCandidates(
   return value;
 }
 
-export async function getFarmScanner(token?: string) {
+export async function getFarmScanner(token?: string, forceRefresh = false) {
   if (token) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(token))
       throw new Error("Use a token contract address for full-chain search");
@@ -573,9 +693,13 @@ export async function getFarmScanner(token?: string) {
       merged.set(item[0].toLowerCase(), item);
     return buildResponse([...merged.values()], address);
   }
-  if (scannerCache && scannerCache.expiresAt > Date.now())
+  if (!forceRefresh && scannerCache && scannerCache.expiresAt > Date.now())
     return scannerCache.value;
-  const value = await buildResponse(await activeCandidates());
+  const [active, catalog] = await Promise.all([
+    activeCandidates(),
+    catalogCandidates(),
+  ]);
+  const value = await buildResponse(mergeDefaultCandidates(active, catalog));
   scannerCache = { expiresAt: Date.now() + refreshSeconds * 1_000, value };
   return value;
 }

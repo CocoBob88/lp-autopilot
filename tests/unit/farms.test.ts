@@ -72,6 +72,8 @@ describe("farm range simulation", () => {
     const tight = simulateRange(farm, 5_000, 2, 2);
     const wide = simulateRange(farm, 5_000, 30, 30);
     expect(tight.capitalEfficiency).toBeGreaterThan(wide.capitalEfficiency);
+    expect(tight.positionLiquidity).toBeGreaterThan(wide.positionLiquidity);
+    expect(tight.estimatedApr).toBeGreaterThan(wide.estimatedApr!);
   });
 
   it("uses the widest valid tick-aligned bounds for full range", () => {

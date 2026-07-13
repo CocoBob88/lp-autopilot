@@ -42,6 +42,8 @@ export type FarmScannerResponse = {
   refreshAfterSeconds: number;
   sampleMinutes: number;
   minimumTvlUsd: number;
+  catalogSize: number;
+  databaseBacked: boolean;
   source: string;
   query?: string;
 };
@@ -62,6 +64,12 @@ export type LiquidityDistributionResponse = {
   points: LiquidityDistributionPoint[];
   blockNumber: string;
   updatedAt: string;
+};
+
+export type InitializedLiquidityTick = {
+  tick: number;
+  liquidityGross: bigint;
+  liquidityNet: bigint;
 };
 
 export type RangeSimulation = {
@@ -184,10 +192,7 @@ export function simulateTickRange(
   const estimatedAnnualFeesUsd =
     farm.fees24hProjectedUsd == null
       ? null
-      : farm.fees24hProjectedUsd *
-        365 *
-        shareOfActiveLiquidity *
-        observedRangeActivity;
+      : farm.fees24hProjectedUsd * 365 * shareOfActiveLiquidity;
   const estimatedApr =
     estimatedAnnualFeesUsd == null || depositUsd <= 0
       ? null
@@ -211,6 +216,121 @@ export function simulateTickRange(
     estimatedApr,
     capitalEfficiency,
   };
+}
+
+function distributionPoint(
+  tick: number,
+  liquidity: bigint,
+  record: InitializedLiquidityTick | undefined,
+  decimals0: number,
+  decimals1: number,
+): LiquidityDistributionPoint {
+  return {
+    tick,
+    price: priceAtTick(tick, decimals0, decimals1),
+    liquidity: Math.max(0, Number(liquidity)),
+    liquidityGross: (record?.liquidityGross ?? 0n).toString(),
+    liquidityNet: (record?.liquidityNet ?? 0n).toString(),
+  };
+}
+
+export function reconstructLiquidityDistribution(
+  records: InitializedLiquidityTick[],
+  currentTick: number,
+  currentLiquidity: bigint,
+  tickSpacing: number,
+  decimals0: number,
+  decimals1: number,
+): LiquidityDistributionPoint[] {
+  const sorted = [...records].sort((a, b) => a.tick - b.tick);
+  const byTick = new Map(sorted.map((record) => [record.tick, record]));
+  const points = new Map<number, LiquidityDistributionPoint>();
+
+  let downwardLiquidity = currentLiquidity;
+  const lowerRecords = sorted
+    .filter((record) => record.tick < currentTick)
+    .sort((a, b) => b.tick - a.tick);
+  for (const record of lowerRecords) {
+    points.set(
+      record.tick,
+      distributionPoint(
+        record.tick,
+        downwardLiquidity,
+        record,
+        decimals0,
+        decimals1,
+      ),
+    );
+    downwardLiquidity -= record.liquidityNet;
+  }
+  const lowest = lowerRecords.at(-1);
+  if (lowest) {
+    const extensionTick = Math.max(-887272, lowest.tick - tickSpacing);
+    if (extensionTick < lowest.tick) {
+      points.set(
+        extensionTick,
+        distributionPoint(
+          extensionTick,
+          downwardLiquidity,
+          undefined,
+          decimals0,
+          decimals1,
+        ),
+      );
+    }
+  }
+
+  points.set(
+    currentTick,
+    distributionPoint(
+      currentTick,
+      currentLiquidity,
+      byTick.get(currentTick),
+      decimals0,
+      decimals1,
+    ),
+  );
+
+  let upwardLiquidity = currentLiquidity;
+  const upperRecords = sorted.filter((record) => record.tick > currentTick);
+  for (const record of upperRecords) {
+    upwardLiquidity += record.liquidityNet;
+    points.set(
+      record.tick,
+      distributionPoint(
+        record.tick,
+        upwardLiquidity,
+        record,
+        decimals0,
+        decimals1,
+      ),
+    );
+  }
+  const highest = upperRecords.at(-1);
+  if (highest) {
+    const extensionTick = Math.min(887272, highest.tick + tickSpacing);
+    if (extensionTick > highest.tick) {
+      points.set(
+        extensionTick,
+        distributionPoint(
+          extensionTick,
+          upwardLiquidity,
+          undefined,
+          decimals0,
+          decimals1,
+        ),
+      );
+    }
+  }
+
+  return [...points.values()]
+    .filter(
+      (item) =>
+        Number.isFinite(item.price) &&
+        Number.isFinite(item.liquidity) &&
+        item.liquidity >= 0,
+    )
+    .sort((a, b) => a.tick - b.tick);
 }
 
 function amountsAtTick(

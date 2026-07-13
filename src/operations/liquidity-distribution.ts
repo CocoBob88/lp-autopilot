@@ -3,7 +3,7 @@ import { mainnetManifest, MAINNET_CHAIN_ID } from "@/src/chains/robinhood";
 import { erc20Abi, poolAbi } from "@/src/contracts/abis";
 import {
   priceAtTick,
-  type LiquidityDistributionPoint,
+  reconstructLiquidityDistribution,
   type LiquidityDistributionResponse,
 } from "@/src/domain/farms";
 import { getPublicClient } from "@/src/lib/client";
@@ -24,22 +24,6 @@ function compressedTick(tick: number, spacing: number) {
   let compressed = Math.trunc(tick / spacing);
   if (tick < 0 && tick % spacing !== 0) compressed -= 1;
   return compressed;
-}
-
-function point(
-  tick: number,
-  liquidity: bigint,
-  record: TickRecord | undefined,
-  decimals0: number,
-  decimals1: number,
-): LiquidityDistributionPoint {
-  return {
-    tick,
-    price: priceAtTick(tick, decimals0, decimals1),
-    liquidity: Math.max(0, Number(liquidity)),
-    liquidityGross: (record?.liquidityGross ?? 0n).toString(),
-    liquidityNet: (record?.liquidityNet ?? 0n).toString(),
-  };
 }
 
 export async function getLiquidityDistribution(
@@ -166,49 +150,6 @@ export async function getLiquidityDistribution(
     })
     .filter((record): record is TickRecord => record !== null);
 
-  const byTick = new Map(records.map((record) => [record.tick, record]));
-  const pointsByTick = new Map<number, LiquidityDistributionPoint>();
-  let downwardLiquidity = currentLiquidity;
-  for (const record of records
-    .filter((item) => item.tick <= currentTick)
-    .sort((a, b) => b.tick - a.tick)) {
-    downwardLiquidity -= record.liquidityNet;
-    pointsByTick.set(
-      record.tick,
-      point(
-        record.tick,
-        downwardLiquidity,
-        record,
-        Number(decimals0),
-        Number(decimals1),
-      ),
-    );
-  }
-  pointsByTick.set(
-    currentTick,
-    point(
-      currentTick,
-      currentLiquidity,
-      byTick.get(currentTick),
-      Number(decimals0),
-      Number(decimals1),
-    ),
-  );
-  let upwardLiquidity = currentLiquidity;
-  for (const record of records.filter((item) => item.tick > currentTick)) {
-    upwardLiquidity += record.liquidityNet;
-    pointsByTick.set(
-      record.tick,
-      point(
-        record.tick,
-        upwardLiquidity,
-        record,
-        Number(decimals0),
-        Number(decimals1),
-      ),
-    );
-  }
-
   const value: LiquidityDistributionResponse = {
     poolAddress: poolAddress as Address,
     currentTick,
@@ -218,14 +159,14 @@ export async function getLiquidityDistribution(
       Number(decimals1),
     ),
     tickSpacing,
-    points: [...pointsByTick.values()]
-      .filter(
-        (item) =>
-          Number.isFinite(item.price) &&
-          Number.isFinite(item.liquidity) &&
-          item.liquidity >= 0,
-      )
-      .sort((a, b) => a.tick - b.tick),
+    points: reconstructLiquidityDistribution(
+      records,
+      currentTick,
+      currentLiquidity,
+      tickSpacing,
+      Number(decimals0),
+      Number(decimals1),
+    ),
     blockNumber: blockNumber.toString(),
     updatedAt: new Date().toISOString(),
   };
