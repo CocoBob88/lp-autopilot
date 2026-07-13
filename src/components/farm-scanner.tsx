@@ -140,6 +140,16 @@ function compactNumber(value: number) {
   }).format(value);
 }
 
+function volumeHorizon(minutes: number | undefined) {
+  if (minutes == null || !Number.isFinite(minutes)) return "observed window";
+  if (minutes >= 24 * 60 - 1) return "24h";
+  if (minutes >= 60) {
+    const hours = minutes / 60;
+    return `${hours.toLocaleString(undefined, { maximumFractionDigits: 1 })}h`;
+  }
+  return `${Math.max(1, Math.round(minutes))}m`;
+}
+
 function price(value: number | null) {
   if (value == null || !Number.isFinite(value)) return "-";
   if (value === 0) return "$0";
@@ -1044,7 +1054,8 @@ export function FarmScanner({
           {data ? new Date(data.updatedAt).toLocaleTimeString() : "-"}
         </span>
         <span>
-          APR projection: {Math.round(data?.sampleMinutes ?? 0)}m sample
+          APR projection: {Math.round(data?.sampleMinutes ?? 0)}m sample ·
+          age-capped
         </span>
         <span>Refresh: {data?.refreshAfterSeconds ?? 120}s</span>
         <span>TVL floor: {money(data?.minimumTvlUsd ?? 1_000, false)}</span>
@@ -1117,7 +1128,7 @@ export function FarmScanner({
                     onSort={handleSort}
                   />
                   <SortHeader
-                    label="24h volume"
+                    label="Projected volume"
                     sortKey="volume"
                     activeKey={sortKey}
                     direction={sortDirection}
@@ -1185,7 +1196,11 @@ export function FarmScanner({
                       })}
                     </td>
                     <td>{money(farm.tvlUsd)}</td>
-                    <td>{money(farm.volume24hProjectedUsd)}</td>
+                    <td
+                      title={`Projection capped at ${volumeHorizon(farm.volumeProjectionMinutes ?? farm.sampleMinutes)} based on the younger token/pool age`}
+                    >
+                      {money(farm.volume24hProjectedUsd)}
+                    </td>
                     <td>{money(farm.fees24hProjectedUsd)}</td>
                     <td className="dense-apr">
                       {percent(farm.projectedPoolApr)}
@@ -1419,7 +1434,11 @@ export function FarmScanner({
                   )}
                   <span>
                     {selected.sampledTicks.length} samples /{" "}
-                    {Math.round(selected.sampleMinutes)}m
+                    {Math.round(selected.sampleMinutes)}m · volume horizon{" "}
+                    {volumeHorizon(
+                      selected.volumeProjectionMinutes ??
+                        selected.sampleMinutes,
+                    )}
                   </span>
                 </div>
 

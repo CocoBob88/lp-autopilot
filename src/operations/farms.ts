@@ -10,6 +10,7 @@ import {
 } from "@/src/contracts/abis";
 import {
   priceAtTick,
+  projectVolumeWithinTokenAge,
   type FarmOpportunity,
   type FarmScannerResponse,
   type FarmToken,
@@ -153,6 +154,41 @@ async function persistFarmSnapshots(farms: FarmOpportunity[]) {
   } catch {
     return false;
   }
+}
+
+async function trackedPoolAgeMinutes(pools: PoolBase[], now: Date) {
+  const ages = new Map<string, number>();
+  if (!databaseConfigured() || !pools.length) return ages;
+  try {
+    const stored = await prisma.pool.findMany({
+      where: {
+        chainId: MAINNET_CHAIN_ID,
+        address: {
+          in: pools.map((pool) => pool.poolAddress.toLowerCase()),
+        },
+      },
+      select: {
+        address: true,
+        createdAt: true,
+        token0: { select: { createdAt: true } },
+        token1: { select: { createdAt: true } },
+      },
+    });
+    for (const pool of stored) {
+      const firstSeenAt = Math.max(
+        pool.createdAt.getTime(),
+        pool.token0.createdAt.getTime(),
+        pool.token1.createdAt.getTime(),
+      );
+      ages.set(
+        pool.address.toLowerCase(),
+        Math.max(0, (now.getTime() - firstSeenAt) / 60_000),
+      );
+    }
+  } catch {
+    return new Map();
+  }
+  return ages;
 }
 
 function isFarmSnapshot(value: unknown): value is FarmOpportunity {
@@ -469,6 +505,7 @@ function toOpportunity(
   pool: PoolBase,
   blockNumber: bigint,
   sampleMinutes: number,
+  tokenAgeMinutes: number | null,
   updatedAt: string,
 ): FarmOpportunity {
   const priceToken1PerToken0 = priceAtTick(
@@ -501,9 +538,12 @@ function toOpportunity(
           return sum + (value0 + value1) / 2;
         }, 0)
       : null;
-  const projectionFactor = sampleMinutes > 0 ? (24 * 60) / sampleMinutes : 0;
-  const volume24hProjectedUsd =
-    volumeWindowUsd == null ? null : volumeWindowUsd * projectionFactor;
+  const volumeProjection = projectVolumeWithinTokenAge(
+    volumeWindowUsd,
+    sampleMinutes,
+    tokenAgeMinutes,
+  );
+  const volume24hProjectedUsd = volumeProjection.volumeUsd;
   const fees24hProjectedUsd =
     volume24hProjectedUsd == null
       ? null
@@ -548,6 +588,7 @@ function toOpportunity(
     priceToken1PerToken0,
     tvlUsd,
     volume24hProjectedUsd,
+    volumeProjectionMinutes: volumeProjection.projectionMinutes,
     fees24hProjectedUsd,
     projectedPoolApr,
     priceChangePercent,
@@ -607,9 +648,17 @@ async function buildResponse(
   resolveUsdPrices(bases);
   await persistPoolCatalog(bases);
   const catalog = await catalogStatus(bases.length);
-  const updatedAt = new Date().toISOString();
+  const updatedAtDate = new Date();
+  const updatedAt = updatedAtDate.toISOString();
+  const trackedAges = await trackedPoolAgeMinutes(bases, updatedAtDate);
   let farms = bases.map((pool) =>
-    toOpportunity(pool, blockNumber, sampleMinutes, updatedAt),
+    toOpportunity(
+      pool,
+      blockNumber,
+      sampleMinutes,
+      trackedAges.get(pool.poolAddress.toLowerCase()) ?? null,
+      updatedAt,
+    ),
   );
   await persistFarmSnapshots(farms);
   farms = farms.filter(

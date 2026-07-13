@@ -22,6 +22,7 @@ export type FarmOpportunity = {
   priceToken1PerToken0: number;
   tvlUsd: number | null;
   volume24hProjectedUsd: number | null;
+  volumeProjectionMinutes: number;
   fees24hProjectedUsd: number | null;
   projectedPoolApr: number | null;
   priceChangePercent: number | null;
@@ -109,6 +110,24 @@ export function priceAtTick(
   decimals1: number,
 ) {
   return Math.pow(1.0001, tick) * Math.pow(10, decimals0 - decimals1);
+}
+
+export function projectVolumeWithinTokenAge(
+  observedVolumeUsd: number | null,
+  sampleMinutes: number,
+  tokenAgeMinutes: number | null,
+) {
+  const safeSampleMinutes = Math.max(1, sampleMinutes);
+  const projectionMinutes = Math.max(
+    1,
+    Math.min(24 * 60, tokenAgeMinutes ?? safeSampleMinutes),
+  );
+  const projectionFactor = Math.max(1, projectionMinutes / safeSampleMinutes);
+  return {
+    volumeUsd:
+      observedVolumeUsd == null ? null : observedVolumeUsd * projectionFactor,
+    projectionMinutes,
+  };
 }
 
 export function simulateRange(

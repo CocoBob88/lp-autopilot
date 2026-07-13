@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   priceAtTick,
+  projectVolumeWithinTokenAge,
   simulateFullRange,
   simulateImpermanentLoss,
   simulateRange,
@@ -36,6 +37,7 @@ const farm: FarmOpportunity = {
   priceToken1PerToken0: priceAtTick(-201500, 18, 6),
   tvlUsd: 3_600_000,
   volume24hProjectedUsd: 10_000_000,
+  volumeProjectionMinutes: 24 * 60,
   fees24hProjectedUsd: 5_000,
   projectedPoolApr: 50.69,
   priceChangePercent: 1,
@@ -50,6 +52,19 @@ const farm: FarmOpportunity = {
 };
 
 describe("farm range simulation", () => {
+  it("never projects volume beyond the tracked age of the younger token", () => {
+    const young = projectVolumeWithinTokenAge(100_000, 30, 120);
+    const mature = projectVolumeWithinTokenAge(100_000, 30, 3_000);
+    const justSeen = projectVolumeWithinTokenAge(100_000, 30, 5);
+
+    expect(young.projectionMinutes).toBe(120);
+    expect(young.volumeUsd).toBe(400_000);
+    expect(mature.projectionMinutes).toBe(24 * 60);
+    expect(mature.volumeUsd).toBe(4_800_000);
+    expect(justSeen.projectionMinutes).toBe(5);
+    expect(justSeen.volumeUsd).toBe(100_000);
+  });
+
   it("converts V3 ticks into decimal-aware pair prices", () => {
     expect(priceAtTick(-201500, 18, 6)).toBeGreaterThan(1_000);
     expect(priceAtTick(-201500, 18, 6)).toBeLessThan(3_000);
