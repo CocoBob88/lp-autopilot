@@ -18,8 +18,10 @@ import { getPublicClient } from "@/src/lib/client";
 const refreshSeconds = 75;
 const activityWindowBlocks = 2_500n;
 const metricWindowBlocks = 20_000n;
-const maxCandidatePools = 180;
-const maxFarms = 36;
+const minimumTvlUsd = 1_000;
+const maxCandidatePools = 360;
+const maxPoolReads = 120;
+const maxFarms = 100;
 
 type SwapSample = {
   amount0: bigint;
@@ -389,8 +391,8 @@ async function buildResponse(
   }
   const bases = (
     await mapLimit(
-      addresses.slice(0, maxFarms + anchors.length),
-      7,
+      addresses.slice(0, maxPoolReads + anchors.length),
+      12,
       (address) =>
         readPoolBase(
           address,
@@ -404,6 +406,9 @@ async function buildResponse(
   const updatedAt = new Date().toISOString();
   let farms = bases.map((pool) =>
     toOpportunity(pool, blockNumber, sampleMinutes, updatedAt),
+  );
+  farms = farms.filter(
+    (farm) => farm.tvlUsd != null && farm.tvlUsd >= minimumTvlUsd,
   );
   if (query && /^0x[0-9a-fA-F]{40}$/.test(query)) {
     const normalized = query.toLowerCase();
@@ -427,8 +432,9 @@ async function buildResponse(
     updatedAt,
     refreshAfterSeconds: refreshSeconds,
     sampleMinutes,
+    minimumTvlUsd,
     source:
-      "Robinhood Chain RPC · Factory-verified V3 pools · rolling activity sample",
+      "Robinhood Chain RPC · Factory-verified V3 pools · $1,000 minimum TVL · rolling activity sample",
     query,
   };
 }

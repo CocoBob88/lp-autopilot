@@ -47,6 +47,8 @@ import {
   simulateRange,
   type FarmOpportunity,
   type FarmScannerResponse,
+  type LiquidityDistributionPoint,
+  type LiquidityDistributionResponse,
 } from "@/src/domain/farms";
 import { compactAddress } from "@/src/domain/format";
 import { useWallet } from "./wallet-provider";
@@ -215,6 +217,24 @@ function PriceTooltip({
   return <div className="price-tooltip">{price(value)}</div>;
 }
 
+function LiquidityTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: LiquidityDistributionPoint }>;
+}) {
+  const item = payload?.[0]?.payload;
+  if (!active || !item) return null;
+  return (
+    <div className="liquidity-tooltip">
+      <strong>{price(item.price)}</strong>
+      <span>Active liquidity {compactNumber(item.liquidity)}</span>
+      <small>Tick {item.tick.toLocaleString()}</small>
+    </div>
+  );
+}
+
 export function FarmScanner() {
   const wallet = useWallet();
   const [data, setData] = useState<FarmScannerResponse | null>(null);
@@ -228,6 +248,12 @@ export function FarmScanner() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
+  const [distribution, setDistribution] =
+    useState<LiquidityDistributionResponse | null>(null);
+  const [distributionLoading, setDistributionLoading] = useState(false);
+  const [distributionError, setDistributionError] = useState<string | null>(
+    null,
+  );
   const [depositUsd, setDepositUsd] = useState(1_000);
   const [lowerPercent, setLowerPercent] = useState(25);
   const [upperPercent, setUpperPercent] = useState(25);
@@ -390,6 +416,44 @@ export function FarmScanner() {
       high: Math.max(...values) * 1.001,
     };
   }, [chartData, rangePreset, simulation]);
+
+  useEffect(() => {
+    if (!selectedAddress) {
+      setDistribution(null);
+      setDistributionError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setDistributionLoading(true);
+    setDistributionError(null);
+    void fetch(
+      "/api/farms/liquidity?pool=" + encodeURIComponent(selectedAddress),
+      { cache: "no-store", signal: controller.signal },
+    )
+      .then(async (response) => {
+        const body =
+          (await response.json()) as LiquidityDistributionResponse & {
+            error?: string;
+          };
+        if (!response.ok) {
+          throw new Error(body.error || "Liquidity distribution unavailable");
+        }
+        setDistribution(body);
+      })
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError")
+          return;
+        setDistributionError(
+          cause instanceof Error
+            ? cause.message
+            : "Liquidity distribution unavailable",
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDistributionLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedAddress]);
 
   useEffect(() => {
     if (!simulation || rangePreset === "full") {
@@ -645,7 +709,11 @@ export function FarmScanner() {
                       onChange={(event) =>
                         updateFilter("minTvl", event.target.value)
                       }
-                      placeholder="0"
+                      placeholder={
+                        data?.minimumTvlUsd
+                          ? data.minimumTvlUsd.toLocaleString()
+                          : "1,000"
+                      }
                     />
                   </label>
                   <label>
@@ -729,6 +797,7 @@ export function FarmScanner() {
           APR projection: {Math.round(data?.sampleMinutes ?? 0)}m sample
         </span>
         <span>Refresh: {data?.refreshAfterSeconds ?? 75}s</span>
+        <span>TVL floor: {money(data?.minimumTvlUsd ?? 1_000, false)}</span>
         {chainQuery && (
           <button
             type="button"
@@ -1044,6 +1113,127 @@ export function FarmScanner() {
                     {selected.sampledTicks.length} samples /{" "}
                     {Math.round(selected.sampleMinutes)}m
                   </span>
+                </div>
+
+                <div className="liquidity-chart-card">
+                  <div className="liquidity-chart-head">
+                    <div>
+                      <span>Liquidity distribution</span>
+                      <strong>Initialized V3 ticks around current price</strong>
+                    </div>
+                    {distribution && (
+                      <span>
+                        {distribution.points.length} ticks · block{" "}
+                        {Number(distribution.blockNumber).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                  {distributionLoading ? (
+                    <div className="liquidity-chart-state">
+                      <LoaderCircle className="spin" size={16} />
+                      Reading initialized liquidity...
+                    </div>
+                  ) : distributionError ? (
+                    <div className="liquidity-chart-state error-state">
+                      {distributionError}
+                    </div>
+                  ) : distribution?.points.length ? (
+                    <div className="liquidity-chart">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart
+                          data={distribution.points}
+                          margin={{ top: 8, right: 8, bottom: 2, left: 8 }}
+                        >
+                          <defs>
+                            <linearGradient
+                              id="liquidityFill"
+                              x1="0"
+                              y1="0"
+                              x2="0"
+                              y2="1"
+                            >
+                              <stop
+                                offset="0%"
+                                stopColor="#13b8c4"
+                                stopOpacity={0.82}
+                              />
+                              <stop
+                                offset="100%"
+                                stopColor="#13b8c4"
+                                stopOpacity={0.12}
+                              />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid stroke="#1d2420" vertical={false} />
+                          <XAxis
+                            type="number"
+                            dataKey="price"
+                            domain={["dataMin", "dataMax"]}
+                            tick={{ fill: "#69756e", fontSize: 8 }}
+                            tickLine={false}
+                            axisLine={false}
+                            tickFormatter={(value) => price(Number(value))}
+                            minTickGap={45}
+                          />
+                          <YAxis hide domain={[0, "dataMax"]} />
+                          <Tooltip content={<LiquidityTooltip />} />
+                          <ReferenceArea
+                            x1={simulation.lowerPrice}
+                            x2={simulation.upperPrice}
+                            fill="#00d632"
+                            fillOpacity={0.08}
+                            stroke="#00d632"
+                            strokeOpacity={0.45}
+                            ifOverflow="hidden"
+                          />
+                          <ReferenceLine
+                            x={simulation.lowerPrice}
+                            stroke="#00f08a"
+                            strokeWidth={1.5}
+                            ifOverflow="hidden"
+                          />
+                          <ReferenceLine
+                            x={selected.priceToken1PerToken0}
+                            stroke="#f3cf45"
+                            strokeWidth={1.2}
+                            ifOverflow="hidden"
+                          />
+                          <ReferenceLine
+                            x={simulation.upperPrice}
+                            stroke="#00f08a"
+                            strokeWidth={1.5}
+                            ifOverflow="hidden"
+                          />
+                          <Area
+                            type="stepAfter"
+                            dataKey="liquidity"
+                            stroke="#13b8c4"
+                            strokeWidth={1}
+                            fill="url(#liquidityFill)"
+                            isAnimationActive={false}
+                          />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <div className="liquidity-chart-state">
+                      No initialized ticks were found around this price.
+                    </div>
+                  )}
+                  <div className="liquidity-range-legend">
+                    <span>
+                      <i className="range-bound-line" /> MIN{" "}
+                      {price(simulation.lowerPrice)}
+                    </span>
+                    <span>
+                      <i className="current-price-line" /> CURRENT{" "}
+                      {price(selected.priceToken1PerToken0)}
+                    </span>
+                    <span>
+                      <i className="range-bound-line" /> MAX{" "}
+                      {price(simulation.upperPrice)}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="simulation-results">

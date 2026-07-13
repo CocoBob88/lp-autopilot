@@ -41,8 +41,27 @@ export type FarmScannerResponse = {
   updatedAt: string;
   refreshAfterSeconds: number;
   sampleMinutes: number;
+  minimumTvlUsd: number;
   source: string;
   query?: string;
+};
+
+export type LiquidityDistributionPoint = {
+  tick: number;
+  price: number;
+  liquidity: number;
+  liquidityGross: string;
+  liquidityNet: string;
+};
+
+export type LiquidityDistributionResponse = {
+  poolAddress: `0x${string}`;
+  currentTick: number;
+  currentPrice: number;
+  tickSpacing: number;
+  points: LiquidityDistributionPoint[];
+  blockNumber: string;
+  updatedAt: string;
 };
 
 export type RangeSimulation = {

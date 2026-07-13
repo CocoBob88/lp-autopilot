@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { validateManifest } from "@/src/operations/manifest";
 import { getFarmScanner } from "@/src/operations/farms";
 import { buildMintPlan } from "@/src/operations/mint-plan";
+import { getLiquidityDistribution } from "@/src/operations/liquidity-distribution";
 import { mainnetManifest } from "@/src/chains/robinhood";
 
 describe.skipIf(process.env.RUN_MAINNET_READ_TESTS !== "true")(
@@ -40,7 +41,22 @@ describe.skipIf(process.env.RUN_MAINNET_READ_TESTS !== "true")(
         amount1: "0.01",
         slippageBps: 100,
       });
-      expect(scanner.farms.length).toBeGreaterThan(10);
+      const distribution = await getLiquidityDistribution(farm!.poolAddress);
+      expect(scanner.farms.length).toBeGreaterThanOrEqual(50);
+      expect(
+        scanner.farms.every(
+          (candidate) =>
+            candidate.tvlUsd != null &&
+            candidate.tvlUsd >= scanner.minimumTvlUsd,
+        ),
+      ).toBe(true);
+      expect(distribution.points.length).toBeGreaterThan(2);
+      expect(distribution.points.some((point) => point.tick < farm!.tick)).toBe(
+        true,
+      );
+      expect(distribution.points.some((point) => point.tick > farm!.tick)).toBe(
+        true,
+      );
       expect(plan.executionReady).toBe(true);
       expect(plan.steps.at(-1)?.method).toBe("mint");
       expect(plan.requestHash).toMatch(/^0x[0-9a-f]{64}$/);

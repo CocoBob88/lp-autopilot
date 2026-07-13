@@ -2135,8 +2135,8 @@ h3 {
   backdrop-filter: blur(7px);
 }
 .pool-modal {
-  width: min(1080px, 96vw);
-  max-height: min(820px, 94vh);
+  width: min(1220px, 97vw);
+  max-height: min(900px, 96vh);
   display: grid;
   grid-template-rows: 52px minmax(0, 1fr);
   overflow: hidden;
@@ -2203,15 +2203,13 @@ h3 {
 .pool-modal-body {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) 350px;
 }
 .pool-chart-column {
   min-width: 0;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(220px, 1fr) auto auto auto;
   padding: 14px;
-  overflow: hidden;
+  overflow-y: auto;
 }
 .chart-head {
   display: flex;
@@ -2239,6 +2237,7 @@ h3 {
   text-align: right;
 }
 .price-chart {
+  height: 245px;
   min-height: 220px;
   border: 1px solid #1c231f;
   border-radius: 5px;
@@ -2265,6 +2264,96 @@ h3 {
   color: #68736c;
   font-size: 8px;
 }
+.liquidity-chart-card {
+  margin: 0 0 10px;
+  border: 1px solid #202722;
+  border-radius: 5px;
+  background: #0a0d0b;
+  overflow: hidden;
+}
+.liquidity-chart-head {
+  min-height: 39px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #1d2420;
+}
+.liquidity-chart-head > div {
+  display: grid;
+  gap: 2px;
+}
+.liquidity-chart-head span {
+  color: #657069;
+  font-size: 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.liquidity-chart-head strong {
+  color: #dfe6e1;
+  font-size: 9px;
+}
+.liquidity-chart {
+  height: 170px;
+  background: linear-gradient(rgba(19, 184, 196, 0.025), transparent), #090c0a;
+}
+.liquidity-chart-state {
+  height: 170px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #69756e;
+  font-size: 8px;
+}
+.liquidity-chart-state.error-state {
+  color: #d47b83;
+}
+.liquidity-tooltip {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #3a443e;
+  border-radius: 4px;
+  background: #111612;
+  padding: 6px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.liquidity-tooltip strong {
+  color: #eff4f1;
+  font-size: 9px;
+}
+.liquidity-tooltip span,
+.liquidity-tooltip small {
+  color: #7c8880;
+  font-size: 7px;
+}
+.liquidity-range-legend {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border-top: 1px solid #1d2420;
+  color: #738078;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+}
+.liquidity-range-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.liquidity-range-legend i {
+  width: 7px;
+  height: 2px;
+  background: #00f08a;
+}
+.liquidity-range-legend i.current-price-line {
+  background: #f3cf45;
+}
 .chart-legend span {
   display: inline-flex;
   align-items: center;
@@ -2290,6 +2379,7 @@ h3 {
   border: 1px solid #202722;
   border-radius: 5px;
   overflow: hidden;
+  margin-top: 0;
 }
 .simulation-results div {
   min-width: 0;
