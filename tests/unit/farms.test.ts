@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   priceAtTick,
+  simulateFullRange,
   simulateRange,
   type FarmOpportunity,
 } from "@/src/domain/farms";
@@ -70,5 +71,14 @@ describe("farm range simulation", () => {
     const tight = simulateRange(farm, 5_000, 2, 2);
     const wide = simulateRange(farm, 5_000, 30, 30);
     expect(tight.capitalEfficiency).toBeGreaterThan(wide.capitalEfficiency);
+  });
+
+  it("uses the widest valid tick-aligned bounds for full range", () => {
+    const result = simulateFullRange(farm, 5_000);
+    expect(result.tickLower).toBe(-887270);
+    expect(result.tickUpper).toBe(887270);
+    expect(Math.abs(result.tickLower % farm.tickSpacing)).toBe(0);
+    expect(Math.abs(result.tickUpper % farm.tickSpacing)).toBe(0);
+    expect(result.capitalEfficiency).toBeCloseTo(1, 3);
   });
 });

@@ -103,6 +103,34 @@ export function simulateRange(
       "up",
     ),
   );
+  return simulateTickRange(farm, depositUsd, tickLower, tickUpper);
+}
+
+export function simulateFullRange(
+  farm: FarmOpportunity,
+  depositUsd: number,
+): RangeSimulation {
+  const tickLower = Math.ceil(-887272 / farm.tickSpacing) * farm.tickSpacing;
+  const tickUpper = Math.floor(887272 / farm.tickSpacing) * farm.tickSpacing;
+  return simulateTickRange(farm, depositUsd, tickLower, tickUpper);
+}
+
+export function simulateTickRange(
+  farm: FarmOpportunity,
+  depositUsd: number,
+  tickLower: number,
+  tickUpper: number,
+): RangeSimulation {
+  const lowerPrice = priceAtTick(
+    tickLower,
+    farm.token0.decimals,
+    farm.token1.decimals,
+  );
+  const upperPrice = priceAtTick(
+    tickUpper,
+    farm.token0.decimals,
+    farm.token1.decimals,
+  );
   const sqrtPrice = Math.sqrt(Math.pow(1.0001, farm.tick));
   const sqrtLower = Math.sqrt(Math.pow(1.0001, tickLower));
   const sqrtUpper = Math.sqrt(Math.pow(1.0001, tickUpper));

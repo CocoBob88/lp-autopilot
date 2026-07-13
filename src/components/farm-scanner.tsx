@@ -1,23 +1,34 @@
 "use client";
 
 import {
-  ArrowDownUp,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   Check,
-  ChevronRight,
+  ChevronsUpDown,
   CircleAlert,
   Clock3,
   ExternalLink,
   Filter,
-  Layers3,
   LoaderCircle,
   RefreshCw,
   Search,
-  ShieldCheck,
-  Sparkles,
+  SlidersHorizontal,
   WalletCards,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import {
   createPublicClient,
   createWalletClient,
@@ -31,6 +42,8 @@ import {
 } from "viem";
 import { positionManagerAbi } from "@/src/contracts/abis";
 import {
+  priceAtTick,
+  simulateFullRange,
   simulateRange,
   type FarmOpportunity,
   type FarmScannerResponse,
@@ -38,11 +51,31 @@ import {
 import { compactAddress } from "@/src/domain/format";
 import { useWallet } from "./wallet-provider";
 
-type SortKey = "opportunity" | "apr" | "tvl" | "volume" | "activity";
+type SortKey =
+  | "pair"
+  | "fee"
+  | "price"
+  | "tvl"
+  | "volume"
+  | "fees"
+  | "apr"
+  | "move"
+  | "swaps"
+  | "liquidity";
+type SortDirection = "asc" | "desc";
+type RangePreset = "small" | "wide" | "full" | "custom";
+type Filters = {
+  fee: string;
+  minTvl: string;
+  minVolume: string;
+  minApr: string;
+  minSwaps: string;
+  maxMove: string;
+};
 type MintPlan = {
   requestHash: string;
-  token0: `0x${string}`;
-  token1: `0x${string}`;
+  token0: Hex;
+  token1: Hex;
   amount0: string;
   amount1: string;
   tickLower: number;
@@ -52,17 +85,26 @@ type MintPlan = {
   steps: Array<{
     ordinal: number;
     label: string;
-    target: `0x${string}`;
+    target: Hex;
     method: string;
-    calldata: `0x${string}`;
+    calldata: Hex;
     value: string;
     simulated: boolean;
     simulationError?: string;
   }>;
 };
 
+const EMPTY_FILTERS: Filters = {
+  fee: "ALL",
+  minTvl: "",
+  minVolume: "",
+  minApr: "",
+  minSwaps: "",
+  maxMove: "",
+};
+
 function money(value: number | null, compact = true) {
-  if (value == null || !Number.isFinite(value)) return "—";
+  if (value == null || !Number.isFinite(value)) return "-";
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -71,9 +113,33 @@ function money(value: number | null, compact = true) {
   }).format(value);
 }
 
-function percent(value: number | null, maximumFractionDigits = 1) {
-  if (value == null || !Number.isFinite(value)) return "—";
-  return `${value.toLocaleString(undefined, { maximumFractionDigits })}%`;
+function percent(value: number | null, digits = 1) {
+  if (value == null || !Number.isFinite(value)) return "-";
+  return (
+    value.toLocaleString(undefined, { maximumFractionDigits: digits }) + "%"
+  );
+}
+
+function compactNumber(value: number) {
+  if (!Number.isFinite(value)) return "-";
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function price(value: number | null) {
+  if (value == null || !Number.isFinite(value)) return "-";
+  if (value === 0) return "$0";
+  if (Math.abs(value) < 0.0001 || Math.abs(value) >= 1_000_000) {
+    return "$" + value.toExponential(3);
+  }
+  return (
+    "$" +
+    value.toLocaleString(undefined, {
+      maximumSignificantDigits: 7,
+    })
+  );
 }
 
 function amount(value: number, decimals: number) {
@@ -86,8 +152,8 @@ function amount(value: number, decimals: number) {
 
 function TokenPair({ farm }: { farm: FarmOpportunity }) {
   return (
-    <div className="farm-pair">
-      <div className="token-stack" aria-hidden="true">
+    <div className="dense-pair">
+      <div className="dense-token-stack" aria-hidden="true">
         <span>{farm.token0.symbol.slice(0, 1)}</span>
         <span>{farm.token1.symbol.slice(0, 1)}</span>
       </div>
@@ -101,6 +167,54 @@ function TokenPair({ farm }: { farm: FarmOpportunity }) {
   );
 }
 
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  direction: SortDirection;
+  onSort: (key: SortKey) => void;
+}) {
+  const active = sortKey === activeKey;
+  return (
+    <th
+      aria-sort={
+        active ? (direction === "asc" ? "ascending" : "descending") : "none"
+      }
+    >
+      <button type="button" onClick={() => onSort(sortKey)}>
+        {label}
+        {active ? (
+          direction === "asc" ? (
+            <ArrowUp size={11} />
+          ) : (
+            <ArrowDown size={11} />
+          )
+        ) : (
+          <ChevronsUpDown size={11} />
+        )}
+      </button>
+    </th>
+  );
+}
+
+function PriceTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ value?: number | string }>;
+}) {
+  const value = Number(payload?.[0]?.value);
+  if (!active || !Number.isFinite(value)) return null;
+  return <div className="price-tooltip">{price(value)}</div>;
+}
+
 export function FarmScanner() {
   const wallet = useWallet();
   const [data, setData] = useState<FarmScannerResponse | null>(null);
@@ -109,12 +223,17 @@ export function FarmScanner() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [chainQuery, setChainQuery] = useState<string | null>(null);
-  const [sort, setSort] = useState<SortKey>("opportunity");
-  const [risk, setRisk] = useState("ALL");
+  const [sortKey, setSortKey] = useState<SortKey>("apr");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
   const [depositUsd, setDepositUsd] = useState(1_000);
-  const [lowerPercent, setLowerPercent] = useState(10);
-  const [upperPercent, setUpperPercent] = useState(10);
+  const [lowerPercent, setLowerPercent] = useState(25);
+  const [upperPercent, setUpperPercent] = useState(25);
+  const [rangePreset, setRangePreset] = useState<RangePreset>("wide");
+  const [lowerPriceInput, setLowerPriceInput] = useState("");
+  const [upperPriceInput, setUpperPriceInput] = useState("");
   const [slippageBps, setSlippageBps] = useState(100);
   const [mintPlan, setMintPlan] = useState<MintPlan | null>(null);
   const [mintBusy, setMintBusy] = useState(false);
@@ -129,20 +248,21 @@ export function FarmScanner() {
     setError(null);
     try {
       const response = await fetch(
-        token ? `/api/farms?token=${encodeURIComponent(token)}` : "/api/farms",
+        token ? "/api/farms?token=" + encodeURIComponent(token) : "/api/farms",
         { cache: "no-store" },
       );
       const body = (await response.json()) as FarmScannerResponse & {
         error?: string;
       };
-      if (!response.ok)
+      if (!response.ok) {
         throw new Error(body.error || "Farm scanner unavailable");
+      }
       setData(body);
       setChainQuery(token ?? null);
       setSelectedAddress((current) =>
         body.farms.some((farm) => farm.poolAddress === current)
           ? current
-          : (body.farms[0]?.poolAddress ?? null),
+          : null,
       );
     } catch (cause) {
       setError(
@@ -156,14 +276,32 @@ export function FarmScanner() {
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => void load(undefined, true), 75_000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load(undefined, true);
+    }, 75_000);
     return () => window.clearInterval(timer);
   }, [load]);
 
+  useEffect(() => {
+    if (!selectedAddress) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedAddress(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [selectedAddress]);
+
   const farms = useMemo(() => {
     const needle = search.trim().toLowerCase();
+    const numeric = (value: string) =>
+      value.trim() === "" ? null : Number(value);
     const visible = (data?.farms ?? []).filter((farm) => {
-      const matches =
+      const matchesSearch =
         !needle ||
         farm.token0.symbol.toLowerCase().includes(needle) ||
         farm.token1.symbol.toLowerCase().includes(needle) ||
@@ -172,37 +310,96 @@ export function FarmScanner() {
         farm.token0.address.toLowerCase() === needle ||
         farm.token1.address.toLowerCase() === needle ||
         farm.poolAddress.toLowerCase() === needle;
-      return matches && (risk === "ALL" || farm.risk === risk);
+      const minTvl = numeric(filters.minTvl);
+      const minVolume = numeric(filters.minVolume);
+      const minApr = numeric(filters.minApr);
+      const minSwaps = numeric(filters.minSwaps);
+      const maxMove = numeric(filters.maxMove);
+      return (
+        matchesSearch &&
+        (filters.fee === "ALL" || farm.fee.toString() === filters.fee) &&
+        (minTvl == null || (farm.tvlUsd ?? -Infinity) >= minTvl) &&
+        (minVolume == null ||
+          (farm.volume24hProjectedUsd ?? -Infinity) >= minVolume) &&
+        (minApr == null || (farm.projectedPoolApr ?? -Infinity) >= minApr) &&
+        (minSwaps == null || farm.swapsInWindow >= minSwaps) &&
+        (maxMove == null ||
+          Math.abs(farm.priceChangePercent ?? Infinity) <= maxMove)
+      );
     });
+    const value = (farm: FarmOpportunity): number | string | null => {
+      if (sortKey === "pair") {
+        return farm.token0.symbol + "/" + farm.token1.symbol;
+      }
+      if (sortKey === "fee") return farm.feePercent;
+      if (sortKey === "price") return farm.priceToken1PerToken0;
+      if (sortKey === "tvl") return farm.tvlUsd;
+      if (sortKey === "volume") return farm.volume24hProjectedUsd;
+      if (sortKey === "fees") return farm.fees24hProjectedUsd;
+      if (sortKey === "apr") return farm.projectedPoolApr;
+      if (sortKey === "move") return farm.priceChangePercent;
+      if (sortKey === "swaps") return farm.swapsInWindow;
+      return Number(farm.liquidity);
+    };
     return visible.sort((a, b) => {
-      if (sort === "apr")
-        return (b.projectedPoolApr ?? -1) - (a.projectedPoolApr ?? -1);
-      if (sort === "tvl") return (b.tvlUsd ?? -1) - (a.tvlUsd ?? -1);
-      if (sort === "volume")
-        return (
-          (b.volume24hProjectedUsd ?? -1) - (a.volume24hProjectedUsd ?? -1)
-        );
-      if (sort === "activity") return b.swapsInWindow - a.swapsInWindow;
-      const score = (farm: FarmOpportunity) =>
-        Math.log10(Math.max(1, farm.tvlUsd ?? 1)) *
-        Math.log10(
-          Math.max(1, farm.volume24hProjectedUsd ?? farm.activityScore),
-        );
-      return score(b) - score(a);
+      const aValue = value(a);
+      const bValue = value(b);
+      if (aValue == null && bValue == null) return 0;
+      if (aValue == null) return 1;
+      if (bValue == null) return -1;
+      const compared =
+        typeof aValue === "string" && typeof bValue === "string"
+          ? aValue.localeCompare(bValue)
+          : Number(aValue) - Number(bValue);
+      return sortDirection === "asc" ? compared : -compared;
     });
-  }, [data, risk, search, sort]);
+  }, [data, filters, search, sortDirection, sortKey]);
 
   const selected =
-    data?.farms.find((farm) => farm.poolAddress === selectedAddress) ??
-    farms[0] ??
-    null;
-  const simulation = useMemo(
-    () =>
-      selected
-        ? simulateRange(selected, depositUsd, lowerPercent, upperPercent)
-        : null,
-    [depositUsd, lowerPercent, selected, upperPercent],
-  );
+    data?.farms.find((farm) => farm.poolAddress === selectedAddress) ?? null;
+  const simulation = useMemo(() => {
+    if (!selected) return null;
+    return rangePreset === "full"
+      ? simulateFullRange(selected, depositUsd)
+      : simulateRange(selected, depositUsd, lowerPercent, upperPercent);
+  }, [depositUsd, lowerPercent, rangePreset, selected, upperPercent]);
+
+  const chartData = useMemo(() => {
+    if (!selected) return [];
+    const ticks = selected.sampledTicks.length
+      ? selected.sampledTicks
+      : [selected.tick, selected.tick];
+    return ticks.map((tick, index) => ({
+      index,
+      price: priceAtTick(
+        tick,
+        selected.token0.decimals,
+        selected.token1.decimals,
+      ),
+    }));
+  }, [selected]);
+
+  const chartBand = useMemo(() => {
+    if (!simulation || !chartData.length) return null;
+    if (rangePreset !== "full") {
+      return { low: simulation.lowerPrice, high: simulation.upperPrice };
+    }
+    const values = chartData.map((point) => point.price);
+    return {
+      low: Math.min(...values) * 0.999,
+      high: Math.max(...values) * 1.001,
+    };
+  }, [chartData, rangePreset, simulation]);
+
+  useEffect(() => {
+    if (!simulation || rangePreset === "full") {
+      setLowerPriceInput("");
+      setUpperPriceInput("");
+      return;
+    }
+    setLowerPriceInput(String(Number(simulation.lowerPrice.toPrecision(7))));
+    setUpperPriceInput(String(Number(simulation.upperPrice.toPrecision(7))));
+  }, [rangePreset, simulation]);
 
   useEffect(() => {
     setMintPlan(null);
@@ -210,7 +407,59 @@ export function FarmScanner() {
     setSubmitted({});
     setCreatedTokenId(null);
     setReviewed(false);
-  }, [depositUsd, lowerPercent, selectedAddress, slippageBps, upperPercent]);
+  }, [
+    depositUsd,
+    lowerPercent,
+    rangePreset,
+    selectedAddress,
+    slippageBps,
+    upperPercent,
+  ]);
+
+  function handleSort(key: SortKey) {
+    if (key === sortKey) {
+      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortKey(key);
+    setSortDirection(key === "pair" ? "asc" : "desc");
+  }
+
+  function updateFilter(key: keyof Filters, value: string) {
+    setFilters((current) => ({ ...current, [key]: value }));
+  }
+
+  function openFarm(farm: FarmOpportunity) {
+    setSelectedAddress(farm.poolAddress);
+    setLowerPercent(25);
+    setUpperPercent(25);
+    setRangePreset("wide");
+  }
+
+  function selectPreset(preset: RangePreset) {
+    setRangePreset(preset);
+    if (preset === "small") {
+      setLowerPercent(5);
+      setUpperPercent(5);
+    } else if (preset === "wide") {
+      setLowerPercent(25);
+      setUpperPercent(25);
+    }
+  }
+
+  function commitLowerPrice(next: number) {
+    if (!selected || !Number.isFinite(next) || next <= 0) return;
+    const change = (1 - next / selected.priceToken1PerToken0) * 100;
+    setLowerPercent(Math.min(99.9, Math.max(0.1, change)));
+    setRangePreset("custom");
+  }
+
+  function commitUpperPrice(next: number) {
+    if (!selected || !Number.isFinite(next) || next <= 0) return;
+    const change = (next / selected.priceToken1PerToken0 - 1) * 100;
+    setUpperPercent(Math.min(500, Math.max(0.1, change)));
+    setRangePreset("custom");
+  }
 
   async function submitSearch(event: React.FormEvent) {
     event.preventDefault();
@@ -240,8 +489,9 @@ export function FarmScanner() {
         plan?: MintPlan;
         error?: string;
       };
-      if (!response.ok || !body.plan)
+      if (!response.ok || !body.plan) {
         throw new Error(body.error || "Mint plan failed");
+      }
       setMintPlan(body.plan);
     } catch (cause) {
       setMintError(cause instanceof Error ? cause.message : "Mint plan failed");
@@ -274,7 +524,7 @@ export function FarmScanner() {
       await publicClient.call({
         account: wallet.address,
         to: step.target,
-        data: step.calldata as Hex,
+        data: step.calldata,
         value: BigInt(step.value),
       });
       const walletClient = createWalletClient({
@@ -286,7 +536,7 @@ export function FarmScanner() {
         account: wallet.address,
         chain,
         to: step.target,
-        data: step.calldata as Hex,
+        data: step.calldata,
         value: BigInt(step.value),
       });
       const receipt = await publicClient.waitForTransactionReceipt({
@@ -318,95 +568,170 @@ export function FarmScanner() {
   }
 
   const nextStep = mintPlan?.steps.find((step) => !submitted[step.ordinal]);
+  const activeFilterCount = Object.entries(filters).filter(([key, value]) =>
+    key === "fee" ? value !== "ALL" : value !== "",
+  ).length;
 
   return (
-    <div className="discover-page">
-      <section className="discover-hero">
-        <div>
-          <div className="eyebrow">Robinhood Chain liquidity intelligence</div>
-          <h1>Find the range before you fund it.</h1>
-          <p>
-            Scan verified V3 pools, compare farm economics, and model a
-            concentrated liquidity range with live on-chain data—no wallet
-            required.
-          </p>
+    <div className="dense-scanner">
+      <section className="dense-toolbar" aria-label="Pool scanner controls">
+        <div className="dense-title">
+          <strong>Liquidity pools</strong>
+          <span>
+            {farms.length}/{data?.farms.length ?? 0}
+          </span>
         </div>
-        <div className="hero-proof">
-          <ShieldCheck size={18} />
-          <div>
-            <strong>Factory verified</strong>
-            <span>Public mainnet data · refreshes every 75 seconds</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="scanner-toolbar" aria-label="Pool scanner controls">
-        <form className="scanner-search" onSubmit={submitSearch}>
-          <Search size={17} />
+        <form className="dense-search" onSubmit={submitSearch}>
+          <Search size={14} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search token name, symbol, pool, or paste a token contract"
+            placeholder="Search token, symbol, pool or contract"
             aria-label="Search tokens and pools"
           />
           {/^0x[0-9a-fA-F]{40}$/.test(search.trim()) && (
-            <button className="button primary" type="submit" disabled={loading}>
+            <button type="submit" disabled={loading}>
               Search chain
             </button>
           )}
         </form>
-        <div className="scanner-filters">
-          <label>
-            <ArrowDownUp size={13} />
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value as SortKey)}
+        <div className="dense-toolbar-actions">
+          <div className="filter-wrap">
+            <button
+              type="button"
+              className={
+                activeFilterCount ? "dense-action active" : "dense-action"
+              }
+              onClick={() => setFiltersOpen((current) => !current)}
+              aria-expanded={filtersOpen}
             >
-              <option value="opportunity">Opportunity score</option>
-              <option value="apr">Projected APR</option>
-              <option value="tvl">TVL</option>
-              <option value="volume">Projected volume</option>
-              <option value="activity">Recent swaps</option>
-            </select>
-          </label>
-          <label>
-            <Filter size={13} />
-            <select
-              value={risk}
-              onChange={(event) => setRisk(event.target.value)}
-            >
-              <option value="ALL">All risk levels</option>
-              <option value="LOW">Low risk</option>
-              <option value="MEDIUM">Medium risk</option>
-              <option value="HIGH">High risk</option>
-              <option value="UNPRICED">Unpriced</option>
-            </select>
-          </label>
+              <Filter size={13} />
+              Filters
+              {activeFilterCount > 0 && <b>{activeFilterCount}</b>}
+            </button>
+            {filtersOpen && (
+              <div className="filter-popover">
+                <div className="filter-popover-head">
+                  <strong>Pool filters</strong>
+                  <button
+                    type="button"
+                    onClick={() => setFilters(EMPTY_FILTERS)}
+                  >
+                    Reset
+                  </button>
+                </div>
+                <div className="filter-grid">
+                  <label>
+                    Fee tier
+                    <select
+                      value={filters.fee}
+                      onChange={(event) =>
+                        updateFilter("fee", event.target.value)
+                      }
+                    >
+                      <option value="ALL">Any</option>
+                      <option value="100">0.01%</option>
+                      <option value="500">0.05%</option>
+                      <option value="3000">0.30%</option>
+                      <option value="10000">1.00%</option>
+                    </select>
+                  </label>
+                  <label>
+                    Minimum TVL ($)
+                    <input
+                      type="number"
+                      min="0"
+                      value={filters.minTvl}
+                      onChange={(event) =>
+                        updateFilter("minTvl", event.target.value)
+                      }
+                      placeholder="0"
+                    />
+                  </label>
+                  <label>
+                    Minimum volume ($)
+                    <input
+                      type="number"
+                      min="0"
+                      value={filters.minVolume}
+                      onChange={(event) =>
+                        updateFilter("minVolume", event.target.value)
+                      }
+                      placeholder="0"
+                    />
+                  </label>
+                  <label>
+                    Minimum APR (%)
+                    <input
+                      type="number"
+                      value={filters.minApr}
+                      onChange={(event) =>
+                        updateFilter("minApr", event.target.value)
+                      }
+                      placeholder="0"
+                    />
+                  </label>
+                  <label>
+                    Minimum swaps
+                    <input
+                      type="number"
+                      min="0"
+                      value={filters.minSwaps}
+                      onChange={(event) =>
+                        updateFilter("minSwaps", event.target.value)
+                      }
+                      placeholder="0"
+                    />
+                  </label>
+                  <label>
+                    Maximum move (%)
+                    <input
+                      type="number"
+                      min="0"
+                      value={filters.maxMove}
+                      onChange={(event) =>
+                        updateFilter("maxMove", event.target.value)
+                      }
+                      placeholder="Any"
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  className="filter-apply"
+                  onClick={() => setFiltersOpen(false)}
+                >
+                  Show {farms.length} pools
+                </button>
+              </div>
+            )}
+          </div>
           <button
-            className="button icon"
+            type="button"
+            className="dense-icon-button"
             onClick={() => void load(chainQuery ?? undefined, true)}
+            aria-label="Refresh scanner"
           >
-            <RefreshCw size={14} className={refreshing ? "spin" : ""} />
-            <span className="sr-only">Refresh scanner</span>
+            <RefreshCw size={13} className={refreshing ? "spin" : ""} />
           </button>
         </div>
       </section>
 
-      <div className="scanner-meta">
+      <div className="dense-meta">
         <span>
-          <span className="live-pulse" /> {data?.farms.length ?? 0} active pools
+          <i /> Live mainnet
         </span>
         <span>
-          <Clock3 size={12} /> Updated{" "}
-          {data ? new Date(data.updatedAt).toLocaleTimeString() : "—"}
+          <Clock3 size={11} />
+          {data ? new Date(data.updatedAt).toLocaleTimeString() : "-"}
         </span>
         <span>
-          APR uses a {Math.round(data?.sampleMinutes ?? 0)}-minute rolling
-          sample
+          APR projection: {Math.round(data?.sampleMinutes ?? 0)}m sample
         </span>
+        <span>Refresh: {data?.refreshAfterSeconds ?? 75}s</span>
         {chainQuery && (
           <button
-            className="text-button"
+            type="button"
             onClick={() => {
               setSearch("");
               void load();
@@ -417,65 +742,130 @@ export function FarmScanner() {
         )}
       </div>
 
-      <section className="scanner-panel">
+      <section className="dense-table-panel">
         {loading ? (
-          <div className="scanner-loading">
-            <LoaderCircle className="spin" size={24} />
-            <strong>Reading active pools and farm economics</strong>
-            <span>
-              Validating factory, tokens, reserves, prices, and swap activity…
-            </span>
+          <div className="dense-state">
+            <LoaderCircle className="spin" size={20} />
+            <strong>Loading live pools</strong>
+            <span>Reading mainnet liquidity and activity...</span>
           </div>
         ) : error ? (
-          <div className="scanner-loading error-state">
-            <CircleAlert size={24} />
-            <strong>Scanner data is temporarily unavailable</strong>
+          <div className="dense-state error-state">
+            <CircleAlert size={20} />
+            <strong>Scanner unavailable</strong>
             <span>{error}</span>
             <button
-              className="button"
+              type="button"
               onClick={() => void load(chainQuery ?? undefined)}
             >
               Try again
             </button>
           </div>
         ) : farms.length ? (
-          <div className="farm-table-wrap">
-            <table className="farm-table">
+          <div className="dense-table-scroll">
+            <table className="dense-table">
               <thead>
                 <tr>
-                  <th>Pool</th>
-                  <th>Fee</th>
-                  <th>TVL</th>
-                  <th>Projected 24h volume</th>
-                  <th>Pool fee APR</th>
-                  <th>Price move</th>
-                  <th>Recent swaps</th>
-                  <th>Risk</th>
-                  <th />
+                  <SortHeader
+                    label="Pool"
+                    sortKey="pair"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Fee"
+                    sortKey="fee"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Price"
+                    sortKey="price"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="TVL"
+                    sortKey="tvl"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="24h volume"
+                    sortKey="volume"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Fees/day"
+                    sortKey="fees"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="APR"
+                    sortKey="apr"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Move"
+                    sortKey="move"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Swaps"
+                    sortKey="swaps"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
+                  <SortHeader
+                    label="Liquidity"
+                    sortKey="liquidity"
+                    activeKey={sortKey}
+                    direction={sortDirection}
+                    onSort={handleSort}
+                  />
                 </tr>
               </thead>
               <tbody>
                 {farms.map((farm) => (
                   <tr
                     key={farm.poolAddress}
-                    className={
-                      selected?.poolAddress === farm.poolAddress
-                        ? "selected"
-                        : ""
-                    }
-                    onClick={() => setSelectedAddress(farm.poolAddress)}
+                    tabIndex={0}
+                    onClick={() => openFarm(farm)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openFarm(farm);
+                      }
+                    }}
                   >
                     <td>
                       <TokenPair farm={farm} />
                     </td>
                     <td>
-                      <span className="fee-pill">{farm.feePercent}%</span>
+                      <span className="dense-fee">{farm.feePercent}%</span>
                     </td>
-                    <td>
-                      <strong>{money(farm.tvlUsd)}</strong>
+                    <td className="mono">
+                      {farm.priceToken1PerToken0.toLocaleString(undefined, {
+                        maximumSignificantDigits: 6,
+                      })}
                     </td>
+                    <td>{money(farm.tvlUsd)}</td>
                     <td>{money(farm.volume24hProjectedUsd)}</td>
-                    <td className="apr-cell">
+                    <td>{money(farm.fees24hProjectedUsd)}</td>
+                    <td className="dense-apr">
                       {percent(farm.projectedPoolApr)}
                     </td>
                     <td
@@ -488,13 +878,8 @@ export function FarmScanner() {
                       {percent(farm.priceChangePercent)}
                     </td>
                     <td>{farm.swapsInWindow.toLocaleString()}</td>
-                    <td>
-                      <span className={`risk-pill ${farm.risk.toLowerCase()}`}>
-                        {farm.risk}
-                      </span>
-                    </td>
-                    <td>
-                      <ChevronRight size={14} />
+                    <td className="mono">
+                      {compactNumber(Number(farm.liquidity))}
                     </td>
                   </tr>
                 ))}
@@ -502,354 +887,440 @@ export function FarmScanner() {
             </table>
           </div>
         ) : (
-          <div className="scanner-loading">
-            <Layers3 size={24} />
-            <strong>No pools match this search</strong>
-            <span>
-              Try another symbol or paste the exact token contract address.
-            </span>
+          <div className="dense-state">
+            <SlidersHorizontal size={20} />
+            <strong>No matching pools</strong>
+            <span>Change the search or reset the filters.</span>
           </div>
         )}
       </section>
 
-      {selected && simulation && (
-        <section className="farm-workbench">
-          <div className="farm-detail-card">
-            <div className="workbench-head">
-              <div>
-                <span className="eyebrow">Selected opportunity</span>
-                <TokenPair farm={selected} />
+      {selected && simulation && chartBand && (
+        <div
+          className="pool-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setSelectedAddress(null);
+          }}
+        >
+          <section
+            className="pool-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={
+              selected.token0.symbol +
+              "/" +
+              selected.token1.symbol +
+              " range simulator"
+            }
+          >
+            <header className="pool-modal-head">
+              <TokenPair farm={selected} />
+              <div className="pool-head-metrics">
+                <span>
+                  Price <b>{price(selected.token0.priceUsd)}</b>
+                </span>
+                <span>
+                  TVL <b>{money(selected.tvlUsd)}</b>
+                </span>
+                <span>
+                  Pool APR <b>{percent(selected.projectedPoolApr)}</b>
+                </span>
               </div>
               <a
-                href={`https://robinhoodchain.blockscout.com/address/${selected.poolAddress}`}
+                href={
+                  "https://robinhoodchain.blockscout.com/address/" +
+                  selected.poolAddress
+                }
                 target="_blank"
                 rel="noreferrer"
-                className="button"
+                className="pool-head-link"
               >
-                Explorer <ExternalLink size={12} />
+                Explorer <ExternalLink size={11} />
               </a>
-            </div>
-            <div className="metric-ribbon">
-              <div>
-                <span>Pool price</span>
-                <strong>
-                  {selected.priceToken1PerToken0.toLocaleString(undefined, {
-                    maximumSignificantDigits: 7,
-                  })}
-                </strong>
-                <small>
-                  {selected.token1.symbol} per {selected.token0.symbol}
-                </small>
-              </div>
-              <div>
-                <span>TVL</span>
-                <strong>{money(selected.tvlUsd)}</strong>
-                <small>Live token reserves</small>
-              </div>
-              <div>
-                <span>Projected fees / day</span>
-                <strong>{money(selected.fees24hProjectedUsd)}</strong>
-                <small>Rolling sample projection</small>
-              </div>
-              <div>
-                <span>Pool APR</span>
-                <strong className="green-text">
-                  {percent(selected.projectedPoolApr)}
-                </strong>
-                <small>Before range selection</small>
-              </div>
-            </div>
-            <div className="range-visual">
-              <div className="range-labels">
-                <span>
-                  Lower{" "}
-                  {simulation.lowerPrice.toLocaleString(undefined, {
-                    maximumSignificantDigits: 6,
-                  })}
-                </span>
-                <strong>
-                  Current{" "}
-                  {selected.priceToken1PerToken0.toLocaleString(undefined, {
-                    maximumSignificantDigits: 6,
-                  })}
-                </strong>
-                <span>
-                  Upper{" "}
-                  {simulation.upperPrice.toLocaleString(undefined, {
-                    maximumSignificantDigits: 6,
-                  })}
-                </span>
-              </div>
-              <div className="range-track">
-                <span className="range-fill" />
-                <span className="range-marker" />
-              </div>
-              <div className="range-caption">
-                Your simulated active range · ticks{" "}
-                {simulation.tickLower.toLocaleString()} to{" "}
-                {simulation.tickUpper.toLocaleString()}
-              </div>
-            </div>
-            <div className="token-metrics-grid">
-              {[selected.token0, selected.token1].map((token, index) => (
-                <div className="token-metric-card" key={token.address}>
+              <button
+                type="button"
+                className="pool-close"
+                onClick={() => setSelectedAddress(null)}
+                aria-label="Close range simulator"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="pool-modal-body">
+              <div className="pool-chart-column">
+                <div className="chart-head">
                   <div>
-                    <span className="token-letter">
-                      {token.symbol.slice(0, 1)}
-                    </span>
-                    <strong>{token.symbol}</strong>
+                    <span>Observed pool price</span>
+                    <strong>
+                      {selected.priceToken1PerToken0.toLocaleString(undefined, {
+                        maximumSignificantDigits: 7,
+                      })}{" "}
+                      {selected.token1.symbol}
+                    </strong>
                   </div>
-                  <dl>
-                    <div>
-                      <dt>Price</dt>
-                      <dd>{money(token.priceUsd, false)}</dd>
-                    </div>
-                    <div>
-                      <dt>Pool reserve</dt>
-                      <dd>
-                        {(index
-                          ? selected.reserve1
-                          : selected.reserve0
-                        ).toLocaleString(undefined, {
-                          maximumFractionDigits: 3,
-                        })}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Contract</dt>
-                      <dd className="mono">
-                        {compactAddress(token.address, 6)}
-                      </dd>
-                    </div>
-                  </dl>
+                  <div className="chart-range-label">
+                    <span>Active range</span>
+                    <strong>
+                      {price(simulation.lowerPrice)} -{" "}
+                      {price(simulation.upperPrice)}
+                    </strong>
+                  </div>
                 </div>
-              ))}
-            </div>
-            {selected.riskReasons.length > 0 && (
-              <div className="risk-note">
-                <CircleAlert size={15} />
-                <div>
-                  <strong>Risk signals</strong>
-                  <span>{selected.riskReasons.join(" · ")}</span>
+                <div className="price-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={chartData}
+                      margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+                    >
+                      <defs>
+                        <linearGradient
+                          id="poolPriceFill"
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stopColor="#00d632"
+                            stopOpacity={0.3}
+                          />
+                          <stop
+                            offset="100%"
+                            stopColor="#00d632"
+                            stopOpacity={0}
+                          />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="#1d2420" vertical={false} />
+                      <XAxis dataKey="index" hide />
+                      <YAxis
+                        width={68}
+                        tick={{ fill: "#69756e", fontSize: 9 }}
+                        tickLine={false}
+                        axisLine={false}
+                        tickFormatter={(value) => price(Number(value))}
+                        domain={["auto", "auto"]}
+                      />
+                      <Tooltip
+                        content={<PriceTooltip />}
+                        cursor={{ stroke: "#58645d", strokeDasharray: "3 3" }}
+                      />
+                      <ReferenceArea
+                        y1={chartBand.low}
+                        y2={chartBand.high}
+                        fill="#00d632"
+                        fillOpacity={0.08}
+                        stroke="#00d632"
+                        strokeOpacity={0.35}
+                        ifOverflow="hidden"
+                      />
+                      <ReferenceLine
+                        y={selected.priceToken1PerToken0}
+                        stroke="#f2f5f3"
+                        strokeDasharray="3 3"
+                        ifOverflow="extendDomain"
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="price"
+                        stroke="#00d632"
+                        strokeWidth={1.5}
+                        fill="url(#poolPriceFill)"
+                        isAnimationActive={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
                 </div>
-              </div>
-            )}
-          </div>
-
-          <aside className="simulator-card">
-            <div className="simulator-title">
-              <div>
-                <span className="eyebrow">Range simulator</span>
-                <h2>Model your position</h2>
-              </div>
-              <Sparkles size={18} />
-            </div>
-            <label className="sim-input">
-              <span>Deposit value</span>
-              <div>
-                <b>$</b>
-                <input
-                  type="number"
-                  min="10"
-                  step="100"
-                  value={depositUsd}
-                  onChange={(event) =>
-                    setDepositUsd(Math.max(0, Number(event.target.value)))
-                  }
-                />
-              </div>
-            </label>
-            <div className="range-inputs">
-              <label>
-                <span>Below current</span>
-                <div>
-                  <input
-                    type="number"
-                    min="0.1"
-                    max="95"
-                    step="0.5"
-                    value={lowerPercent}
-                    onChange={(event) =>
-                      setLowerPercent(Number(event.target.value))
-                    }
-                  />
-                  <b>%</b>
-                </div>
-              </label>
-              <label>
-                <span>Above current</span>
-                <div>
-                  <input
-                    type="number"
-                    min="0.1"
-                    max="500"
-                    step="0.5"
-                    value={upperPercent}
-                    onChange={(event) =>
-                      setUpperPercent(Number(event.target.value))
-                    }
-                  />
-                  <b>%</b>
-                </div>
-              </label>
-            </div>
-            <div className="sim-results">
-              <div>
-                <span>Estimated range APR</span>
-                <strong>{percent(simulation.estimatedApr)}</strong>
-              </div>
-              <div>
-                <span>Estimated annual fees</span>
-                <strong>
-                  {money(simulation.estimatedAnnualFeesUsd, false)}
-                </strong>
-              </div>
-              <div>
-                <span>Observed in-range activity</span>
-                <strong>
-                  {percent(simulation.observedRangeActivity * 100)}
-                </strong>
-              </div>
-              <div>
-                <span>Capital efficiency</span>
-                <strong>{simulation.capitalEfficiency.toFixed(1)}×</strong>
-              </div>
-            </div>
-            <div className="deposit-split">
-              <span>Estimated deposit split</span>
-              <div>
-                <b>
-                  {amount(simulation.amount0, selected.token0.decimals)}{" "}
-                  {selected.token0.symbol}
-                </b>
-                <b>
-                  {amount(simulation.amount1, selected.token1.decimals)}{" "}
-                  {selected.token1.symbol}
-                </b>
-              </div>
-            </div>
-            <label className="slippage-control">
-              <span>
-                Maximum slippage <b>{slippageBps / 100}%</b>
-              </span>
-              <input
-                type="range"
-                min="10"
-                max="500"
-                step="10"
-                value={slippageBps}
-                onChange={(event) => setSlippageBps(Number(event.target.value))}
-              />
-            </label>
-            <p className="model-note">
-              Estimate uses the rolling swap sample, current active liquidity,
-              your projected liquidity share, and observed in-range activity. It
-              is not a guaranteed return.
-            </p>
-
-            {!wallet.address ? (
-              <button
-                className="button primary create-button"
-                onClick={() => void wallet.connect()}
-                disabled={wallet.busy}
-              >
-                <WalletCards size={15} />{" "}
-                {wallet.busy
-                  ? "Connecting…"
-                  : "Connect wallet to create position"}
-              </button>
-            ) : createdTokenId ? (
-              <div className="mint-success">
-                <span>
-                  <Check size={17} />
-                </span>
-                <div>
-                  <strong>Position #{createdTokenId} created</strong>
-                  <small>
-                    The NFT is owned by {compactAddress(wallet.address)}
-                  </small>
-                </div>
-              </div>
-            ) : !mintPlan ? (
-              <button
-                className="button primary create-button"
-                onClick={() => void buildPositionPlan()}
-                disabled={
-                  mintBusy ||
-                  selected.token0.priceUsd == null ||
-                  selected.token1.priceUsd == null
-                }
-              >
-                {mintBusy ? (
-                  <LoaderCircle className="spin" size={15} />
-                ) : (
-                  <ArrowUpRight size={15} />
-                )}
-                Review position transactions
-              </button>
-            ) : (
-              <div className="mint-plan">
-                <div className="mint-plan-head">
-                  <strong>Wallet transaction plan</strong>
+                <div className="chart-legend">
                   <span>
-                    {mintPlan.steps.length} step
-                    {mintPlan.steps.length === 1 ? "" : "s"}
+                    <i className="price-line" /> Recent price
+                  </span>
+                  <span>
+                    <i className="range-area" /> Simulated active range
+                  </span>
+                  <span>
+                    {selected.sampledTicks.length} samples /{" "}
+                    {Math.round(selected.sampleMinutes)}m
                   </span>
                 </div>
-                {mintPlan.steps.map((step) => (
-                  <div className="mint-step" key={step.ordinal}>
-                    <span className={submitted[step.ordinal] ? "done" : ""}>
-                      {submitted[step.ordinal] ? (
-                        <Check size={12} />
-                      ) : (
-                        step.ordinal + 1
-                      )}
-                    </span>
-                    <div>
-                      <strong>{step.label}</strong>
-                      <small>
-                        {step.method} · {compactAddress(step.target, 5)}
-                      </small>
-                    </div>
+
+                <div className="simulation-results">
+                  <div>
+                    <span>Range APR</span>
+                    <strong>{percent(simulation.estimatedApr)}</strong>
                   </div>
-                ))}
-                <div className="mint-gas">
-                  Maximum estimated gas{" "}
-                  <b>
-                    {Number(
-                      formatEther(BigInt(mintPlan.maximumGasCostWei)),
-                    ).toFixed(6)}{" "}
-                    ETH
-                  </b>
+                  <div>
+                    <span>Annual fees</span>
+                    <strong>
+                      {money(simulation.estimatedAnnualFeesUsd, false)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>In-range activity</span>
+                    <strong>
+                      {percent(simulation.observedRangeActivity * 100)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Capital efficiency</span>
+                    <strong>{simulation.capitalEfficiency.toFixed(1)}x</strong>
+                  </div>
                 </div>
-                <label className="review-check">
-                  <input
-                    type="checkbox"
-                    checked={reviewed}
-                    onChange={(event) => setReviewed(event.target.checked)}
-                  />{" "}
-                  I reviewed the token amounts, range, slippage, and transaction
-                  targets.
-                </label>
-                <button
-                  className="button primary create-button"
-                  disabled={!reviewed || mintBusy || !nextStep}
-                  onClick={() => void submitNextStep()}
-                >
-                  {mintBusy ? (
-                    <LoaderCircle className="spin" size={15} />
-                  ) : (
-                    <WalletCards size={15} />
-                  )}
-                  {nextStep
-                    ? `Confirm step ${nextStep.ordinal + 1} in wallet`
-                    : "Transactions submitted"}
-                </button>
+                <div className="split-bar">
+                  <span>Estimated deposit</span>
+                  <div>
+                    <b>
+                      {amount(simulation.amount0, selected.token0.decimals)}{" "}
+                      {selected.token0.symbol}
+                    </b>
+                    <b>
+                      {amount(simulation.amount1, selected.token1.decimals)}{" "}
+                      {selected.token1.symbol}
+                    </b>
+                  </div>
+                </div>
               </div>
-            )}
-            {mintError && <div className="error-box">{mintError}</div>}
-          </aside>
-        </section>
+
+              <aside className="range-panel">
+                <div className="range-panel-title">
+                  <div>
+                    <span>Range simulator</span>
+                    <strong>Configure position</strong>
+                  </div>
+                  <span className="fee-chip">{selected.feePercent}% fee</span>
+                </div>
+
+                <div className="preset-tabs" aria-label="Range presets">
+                  {(["small", "wide", "full", "custom"] as RangePreset[]).map(
+                    (preset) => (
+                      <button
+                        type="button"
+                        key={preset}
+                        className={rangePreset === preset ? "active" : ""}
+                        onClick={() => selectPreset(preset)}
+                      >
+                        {preset}
+                      </button>
+                    ),
+                  )}
+                </div>
+
+                <label className="deposit-input">
+                  <span>Deposit value</span>
+                  <div>
+                    <b>$</b>
+                    <input
+                      type="number"
+                      min="10"
+                      step="100"
+                      value={depositUsd}
+                      onChange={(event) =>
+                        setDepositUsd(Math.max(0, Number(event.target.value)))
+                      }
+                    />
+                    <em>USD</em>
+                  </div>
+                </label>
+
+                <div className="price-bound-inputs">
+                  <label>
+                    <span>Lower price</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      disabled={rangePreset === "full"}
+                      value={lowerPriceInput}
+                      placeholder="Full range"
+                      onChange={(event) =>
+                        setLowerPriceInput(event.target.value)
+                      }
+                      onBlur={() => commitLowerPrice(Number(lowerPriceInput))}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Upper price</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      disabled={rangePreset === "full"}
+                      value={upperPriceInput}
+                      placeholder="Full range"
+                      onChange={(event) =>
+                        setUpperPriceInput(event.target.value)
+                      }
+                      onBlur={() => commitUpperPrice(Number(upperPriceInput))}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div className="range-slider-control">
+                  <div>
+                    <span>Lower boundary</span>
+                    <b>-{lowerPercent.toFixed(1)}%</b>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="95"
+                    step="0.1"
+                    value={lowerPercent}
+                    disabled={rangePreset === "full"}
+                    onChange={(event) => {
+                      setLowerPercent(Number(event.target.value));
+                      setRangePreset("custom");
+                    }}
+                  />
+                </div>
+                <div className="range-slider-control">
+                  <div>
+                    <span>Upper boundary</span>
+                    <b>+{upperPercent.toFixed(1)}%</b>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="200"
+                    step="0.1"
+                    value={upperPercent}
+                    disabled={rangePreset === "full"}
+                    onChange={(event) => {
+                      setUpperPercent(Number(event.target.value));
+                      setRangePreset("custom");
+                    }}
+                  />
+                </div>
+
+                <div className="tick-summary">
+                  <span>
+                    Lower tick <b>{simulation.tickLower.toLocaleString()}</b>
+                  </span>
+                  <span>
+                    Upper tick <b>{simulation.tickUpper.toLocaleString()}</b>
+                  </span>
+                </div>
+
+                <label className="compact-slippage">
+                  <span>
+                    Slippage <b>{slippageBps / 100}%</b>
+                  </span>
+                  <input
+                    type="range"
+                    min="10"
+                    max="500"
+                    step="10"
+                    value={slippageBps}
+                    onChange={(event) =>
+                      setSlippageBps(Number(event.target.value))
+                    }
+                  />
+                </label>
+
+                {!wallet.address ? (
+                  <button
+                    type="button"
+                    className="range-primary"
+                    onClick={() => void wallet.connect()}
+                    disabled={wallet.busy}
+                  >
+                    <WalletCards size={14} />
+                    {wallet.busy ? "Connecting..." : "Connect wallet"}
+                  </button>
+                ) : createdTokenId ? (
+                  <div className="compact-success">
+                    <Check size={15} />
+                    <span>Position #{createdTokenId} created</span>
+                  </div>
+                ) : !mintPlan ? (
+                  <button
+                    type="button"
+                    className="range-primary"
+                    onClick={() => void buildPositionPlan()}
+                    disabled={
+                      mintBusy ||
+                      selected.token0.priceUsd == null ||
+                      selected.token1.priceUsd == null
+                    }
+                  >
+                    {mintBusy ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : (
+                      <ArrowUpRight size={14} />
+                    )}
+                    Review transactions
+                  </button>
+                ) : (
+                  <div className="compact-mint-plan">
+                    <div>
+                      <strong>{mintPlan.steps.length} wallet steps</strong>
+                      <span>
+                        Max gas{" "}
+                        {Number(
+                          formatEther(BigInt(mintPlan.maximumGasCostWei)),
+                        ).toFixed(6)}{" "}
+                        ETH
+                      </span>
+                    </div>
+                    <ol>
+                      {mintPlan.steps.map((step) => (
+                        <li
+                          key={step.ordinal}
+                          className={submitted[step.ordinal] ? "done" : ""}
+                        >
+                          <span>
+                            {submitted[step.ordinal] ? (
+                              <Check size={10} />
+                            ) : (
+                              step.ordinal + 1
+                            )}
+                          </span>
+                          {step.label}
+                        </li>
+                      ))}
+                    </ol>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={reviewed}
+                        onChange={(event) => setReviewed(event.target.checked)}
+                      />
+                      I reviewed the range, amounts and targets
+                    </label>
+                    <button
+                      type="button"
+                      className="range-primary"
+                      disabled={!reviewed || mintBusy || !nextStep}
+                      onClick={() => void submitNextStep()}
+                    >
+                      {mintBusy ? (
+                        <LoaderCircle className="spin" size={14} />
+                      ) : (
+                        <WalletCards size={14} />
+                      )}
+                      {nextStep
+                        ? "Confirm step " + (nextStep.ordinal + 1)
+                        : "Transactions submitted"}
+                    </button>
+                  </div>
+                )}
+                <p className="compact-model-note">
+                  Projection uses recent activity and current liquidity; returns
+                  are not guaranteed.
+                </p>
+                {mintError && <div className="compact-error">{mintError}</div>}
+              </aside>
+            </div>
+          </section>
+        </div>
       )}
     </div>
   );
