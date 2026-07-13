@@ -3,8 +3,6 @@ import Link from "next/link";
 import { ArrowLeft, CircleAlert, ExternalLink, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { formatFeeTier, formatToken } from "@/src/domain/format";
-import { ActionPanel } from "./action-panel";
-import { RangeChart } from "./range-chart";
 import type { PositionData } from "./types";
 
 export function PositionDetail({
@@ -154,7 +152,6 @@ export function PositionDetail({
       </div>
       <div className="detail-grid">
         <div style={{ display: "grid", gap: 14 }}>
-          <RangeChart position={position} />
           <div className="panel">
             <div className="panel-header">
               <h2 style={{ margin: 0 }}>Position accounting</h2>
@@ -219,7 +216,6 @@ export function PositionDetail({
             </div>
           </div>
         </div>
-        <ActionPanel position={position} onRefresh={() => void refresh()} />
       </div>
     </>
   );

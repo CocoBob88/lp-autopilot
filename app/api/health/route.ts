@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { getPublicClient } from "@/src/lib/client";
 import { jsonSafe, sanitizeError } from "@/src/lib/serialize";
 import { validateManifest } from "@/src/operations/manifest";
@@ -11,10 +10,7 @@ export async function GET(request: Request) {
   try {
     rateLimit(request, "health", 120);
     const url = new URL(request.url);
-    const chainId = z.coerce
-      .number()
-      .refine((value) => value === 4663 || value === 46630)
-      .parse(url.searchParams.get("chainId") ?? "4663");
+    const chainId = 4663;
     const started = Date.now();
     const validation = await validateManifest(
       chainId,

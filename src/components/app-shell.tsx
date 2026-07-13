@@ -2,14 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Activity,
-  Bell,
-  Bot,
-  BriefcaseBusiness,
-  Compass,
-  WalletCards,
-} from "lucide-react";
+import { BriefcaseBusiness, Compass, WalletCards } from "lucide-react";
 import { compactAddress } from "@/src/domain/format";
 import { Logo } from "./logo";
 import { useWallet } from "./wallet-provider";
@@ -17,9 +10,6 @@ import { useWallet } from "./wallet-provider";
 const navigation = [
   ["/", "Discover", Compass],
   ["/positions", "My positions", BriefcaseBusiness],
-  ["/strategies", "Automations", Bot],
-  ["/activity", "Activity", Activity],
-  ["/alerts", "Alerts", Bell],
 ] as const;
 
 function NavLink({
@@ -29,7 +19,7 @@ function NavLink({
 }: {
   href: string;
   label: string;
-  Icon: typeof Activity;
+  Icon: typeof Compass;
 }) {
   const pathname = usePathname();
   const active = href === "/" ? pathname === "/" : pathname.startsWith(href);

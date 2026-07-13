@@ -19,10 +19,7 @@ export async function GET(
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/)
       .parse(url.searchParams.get("owner"));
-    const chainId = z.coerce
-      .number()
-      .refine((value) => value === 4663 || value === 46630)
-      .parse(url.searchParams.get("chainId") ?? "4663");
+    const chainId = 4663;
     return NextResponse.json(
       jsonSafe(await readPosition(chainId, owner, BigInt(tokenId))),
       { headers: { "Cache-Control": "no-store" } },
