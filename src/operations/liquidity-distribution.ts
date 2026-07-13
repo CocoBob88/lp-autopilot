@@ -100,32 +100,49 @@ export async function getLiquidityDistribution(
   const currentWord = Math.floor(
     compressedTick(currentTick, tickSpacing) / 256,
   );
-  const wordRadius = Math.min(
+  let wordRadius = Math.min(
     24,
     Math.max(1, Math.ceil(6_000 / (256 * tickSpacing))),
   );
-  const words = Array.from(
-    { length: wordRadius * 2 + 1 },
-    (_, index) => currentWord - wordRadius + index,
-  ).filter((word) => word >= -32768 && word <= 32767);
-  const bitmapResults = await client.multicall({
-    allowFailure: true,
-    contracts: words.map((word) => ({
-      address: poolAddress,
-      abi: poolAbi,
-      functionName: "tickBitmap" as const,
-      args: [word] as const,
-    })),
-  });
+  const maxWordRadius = 96;
+  const bitmaps = new Map<number, bigint>();
+  for (;;) {
+    const words = Array.from(
+      { length: wordRadius * 2 + 1 },
+      (_, index) => currentWord - wordRadius + index,
+    ).filter((word) => word >= -32768 && word <= 32767 && !bitmaps.has(word));
+    const bitmapResults = await client.multicall({
+      allowFailure: true,
+      contracts: words.map((word) => ({
+        address: poolAddress,
+        abi: poolAbi,
+        functionName: "tickBitmap" as const,
+        args: [word] as const,
+      })),
+    });
+    bitmapResults.forEach((result, index) => {
+      if (result.status === "success") bitmaps.set(words[index], result.result);
+    });
+    const initialized = [...bitmaps.entries()].flatMap(([word, bitmap]) => {
+      const ticks: number[] = [];
+      for (let bit = 0; bit < 256; bit += 1) {
+        if ((bitmap & (1n << BigInt(bit))) !== 0n)
+          ticks.push((word * 256 + bit) * tickSpacing);
+      }
+      return ticks;
+    });
+    const hasLower = initialized.some((tick) => tick < currentTick);
+    const hasUpper = initialized.some((tick) => tick > currentTick);
+    if ((hasLower && hasUpper) || wordRadius >= maxWordRadius) break;
+    wordRadius = Math.min(maxWordRadius, wordRadius * 2);
+  }
   const initializedTicks: number[] = [];
-  bitmapResults.forEach((result, wordIndex) => {
-    if (result.status !== "success") return;
-    const bitmap = result.result;
+  for (const [word, bitmap] of bitmaps) {
     for (let bit = 0; bit < 256; bit += 1) {
       if ((bitmap & (1n << BigInt(bit))) === 0n) continue;
-      initializedTicks.push((words[wordIndex] * 256 + bit) * tickSpacing);
+      initializedTicks.push((word * 256 + bit) * tickSpacing);
     }
-  });
+  }
   const nearestTicks = initializedTicks
     .sort((a, b) => Math.abs(a - currentTick) - Math.abs(b - currentTick))
     .slice(0, maxInitializedTicks)

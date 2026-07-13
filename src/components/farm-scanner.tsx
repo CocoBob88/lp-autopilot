@@ -522,11 +522,18 @@ export function FarmScanner() {
   ]);
 
   const liquidityChartDomain = useMemo(() => {
-    if (liquidityChartData.length < 2) return null;
-    const minimum = liquidityChartData[0].price;
-    const maximum = liquidityChartData.at(-1)!.price;
-    return maximum > minimum ? { minimum, maximum } : null;
-  }, [liquidityChartData]);
+    if (liquidityChartData.length >= 2) {
+      const minimum = liquidityChartData[0].price;
+      const maximum = liquidityChartData.at(-1)!.price;
+      if (maximum > minimum) return { minimum, maximum };
+    }
+    if (!Number.isFinite(currentDisplayPrice) || currentDisplayPrice <= 0)
+      return null;
+    return {
+      minimum: currentDisplayPrice * 0.5,
+      maximum: currentDisplayPrice * 1.5,
+    };
+  }, [currentDisplayPrice, liquidityChartData]);
   const liquidityRangePosition = (value: number) => {
     if (!liquidityChartDomain) return 0;
     return Math.round(
@@ -1482,7 +1489,14 @@ export function FarmScanner() {
                           <XAxis
                             type="number"
                             dataKey="price"
-                            domain={["dataMin", "dataMax"]}
+                            domain={
+                              liquidityChartDomain
+                                ? [
+                                    liquidityChartDomain.minimum,
+                                    liquidityChartDomain.maximum,
+                                  ]
+                                : ["dataMin", "dataMax"]
+                            }
                             tick={{ fill: "#69756e", fontSize: 8 }}
                             tickLine={false}
                             axisLine={false}
