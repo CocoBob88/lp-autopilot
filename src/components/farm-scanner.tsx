@@ -11,11 +11,17 @@ import {
   ExternalLink,
   Filter,
   LoaderCircle,
+  Minus,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   SlidersHorizontal,
+  Sparkles,
   WalletCards,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -44,6 +50,7 @@ import { positionManagerAbi } from "@/src/contracts/abis";
 import {
   priceAtTick,
   simulateFullRange,
+  simulateImpermanentLoss,
   simulateRange,
   type FarmOpportunity,
   type FarmScannerResponse,
@@ -66,6 +73,9 @@ type SortKey =
   | "liquidity";
 type SortDirection = "asc" | "desc";
 type RangePreset = "small" | "wide" | "full" | "custom";
+type ChartMetric = "price" | "apr" | "tvl" | "volume" | "fee";
+type ChartWindow = 5 | 15 | 30 | "all";
+type RangeInputMode = "price" | "percent";
 type Filters = {
   fee: string;
   minTvl: string;
@@ -205,16 +215,24 @@ function SortHeader({
   );
 }
 
-function PriceTooltip({
+function formatMetric(metric: ChartMetric, value: number | null) {
+  if (metric === "price") return price(value);
+  if (metric === "apr" || metric === "fee") return percent(value, 2);
+  return money(value);
+}
+
+function MetricTooltip({
   active,
   payload,
+  metric,
 }: {
   active?: boolean;
   payload?: ReadonlyArray<{ value?: number | string }>;
+  metric: ChartMetric;
 }) {
   const value = Number(payload?.[0]?.value);
   if (!active || !Number.isFinite(value)) return null;
-  return <div className="price-tooltip">{price(value)}</div>;
+  return <div className="price-tooltip">{formatMetric(metric, value)}</div>;
 }
 
 function LiquidityTooltip({
@@ -255,11 +273,18 @@ export function FarmScanner() {
     null,
   );
   const [depositUsd, setDepositUsd] = useState(1_000);
-  const [lowerPercent, setLowerPercent] = useState(25);
-  const [upperPercent, setUpperPercent] = useState(25);
+  const [lowerPercent, setLowerPercent] = useState(30);
+  const [upperPercent, setUpperPercent] = useState(30);
   const [rangePreset, setRangePreset] = useState<RangePreset>("wide");
+  const [rangeInputMode, setRangeInputMode] = useState<RangeInputMode>("price");
+  const [quoteToken, setQuoteToken] = useState<0 | 1>(1);
+  const [chartMetric, setChartMetric] = useState<ChartMetric>("price");
+  const [chartWindow, setChartWindow] = useState<ChartWindow>("all");
+  const [liquidityZoom, setLiquidityZoom] = useState(1);
   const [lowerPriceInput, setLowerPriceInput] = useState("");
   const [upperPriceInput, setUpperPriceInput] = useState("");
+  const [showIlSimulation, setShowIlSimulation] = useState(false);
+  const [futurePriceChange, setFuturePriceChange] = useState(20);
   const [slippageBps, setSlippageBps] = useState(100);
   const [mintPlan, setMintPlan] = useState<MintPlan | null>(null);
   const [mintBusy, setMintBusy] = useState(false);
@@ -390,32 +415,137 @@ export function FarmScanner() {
       : simulateRange(selected, depositUsd, lowerPercent, upperPercent);
   }, [depositUsd, lowerPercent, rangePreset, selected, upperPercent]);
 
+  const invertedQuote = quoteToken === 0;
+  const currentDisplayPrice = selected
+    ? invertedQuote
+      ? 1 / selected.priceToken1PerToken0
+      : selected.priceToken1PerToken0
+    : 0;
+  const displayLowerPrice = simulation
+    ? invertedQuote
+      ? 1 / simulation.upperPrice
+      : simulation.lowerPrice
+    : 0;
+  const displayUpperPrice = simulation
+    ? invertedQuote
+      ? 1 / simulation.lowerPrice
+      : simulation.upperPrice
+    : 0;
+  const baseSymbol = selected
+    ? invertedQuote
+      ? selected.token1.symbol
+      : selected.token0.symbol
+    : "";
+  const quoteSymbol = selected
+    ? invertedQuote
+      ? selected.token0.symbol
+      : selected.token1.symbol
+    : "";
+
   const chartData = useMemo(() => {
     if (!selected) return [];
     const ticks = selected.sampledTicks.length
       ? selected.sampledTicks
       : [selected.tick, selected.tick];
-    return ticks.map((tick, index) => ({
-      index,
-      price: priceAtTick(
+    const total = Math.max(1, ticks.length - 1);
+    const points = ticks.map((tick, index) => {
+      const rawPrice = priceAtTick(
         tick,
         selected.token0.decimals,
         selected.token1.decimals,
-      ),
-    }));
-  }, [selected]);
+      );
+      const metricValue =
+        chartMetric === "price"
+          ? invertedQuote
+            ? 1 / rawPrice
+            : rawPrice
+          : chartMetric === "apr"
+            ? (selected.projectedPoolApr ?? 0)
+            : chartMetric === "tvl"
+              ? (selected.tvlUsd ?? 0)
+              : chartMetric === "volume"
+                ? (selected.volume24hProjectedUsd ?? 0)
+                : selected.feePercent;
+      return {
+        index,
+        minutesAgo: selected.sampleMinutes * ((total - index) / total),
+        value: metricValue,
+      };
+    });
+    if (chartWindow === "all") return points;
+    const filtered = points.filter((point) => point.minutesAgo <= chartWindow);
+    return filtered.length >= 2 ? filtered : points.slice(-2);
+  }, [chartMetric, chartWindow, invertedQuote, selected]);
 
   const chartBand = useMemo(() => {
     if (!simulation || !chartData.length) return null;
     if (rangePreset !== "full") {
-      return { low: simulation.lowerPrice, high: simulation.upperPrice };
+      return { low: displayLowerPrice, high: displayUpperPrice };
     }
-    const values = chartData.map((point) => point.price);
+    const values = chartData.map((point) => point.value);
     return {
       low: Math.min(...values) * 0.999,
       high: Math.max(...values) * 1.001,
     };
-  }, [chartData, rangePreset, simulation]);
+  }, [
+    chartData,
+    displayLowerPrice,
+    displayUpperPrice,
+    rangePreset,
+    simulation,
+  ]);
+
+  const liquidityChartData = useMemo(() => {
+    if (!distribution || !selected) return [];
+    const points = distribution.points
+      .map((item) => ({
+        ...item,
+        price: invertedQuote ? 1 / item.price : item.price,
+      }))
+      .sort((a, b) => a.price - b.price);
+    if (liquidityZoom === 1 || points.length < 3) return points;
+    const distances = points.map((item) =>
+      Math.abs(Math.log(item.price / currentDisplayPrice)),
+    );
+    const threshold = Math.max(...distances) / liquidityZoom;
+    const zoomed = points.filter(
+      (item) =>
+        Math.abs(Math.log(item.price / currentDisplayPrice)) <= threshold,
+    );
+    return zoomed.length >= 3 ? zoomed : points;
+  }, [
+    currentDisplayPrice,
+    distribution,
+    invertedQuote,
+    liquidityZoom,
+    selected,
+  ]);
+
+  const ilSimulation = useMemo(
+    () =>
+      selected && simulation
+        ? simulateImpermanentLoss(selected, simulation, futurePriceChange)
+        : null,
+    [futurePriceChange, selected, simulation],
+  );
+
+  const currentRangePosition = useMemo(() => {
+    if (
+      displayLowerPrice <= 0 ||
+      displayUpperPrice <= displayLowerPrice ||
+      currentDisplayPrice <= 0
+    )
+      return 50;
+    return Math.min(
+      100,
+      Math.max(
+        0,
+        ((Math.log(currentDisplayPrice) - Math.log(displayLowerPrice)) /
+          (Math.log(displayUpperPrice) - Math.log(displayLowerPrice))) *
+          100,
+      ),
+    );
+  }, [currentDisplayPrice, displayLowerPrice, displayUpperPrice]);
 
   useEffect(() => {
     if (!selectedAddress) {
@@ -461,9 +591,9 @@ export function FarmScanner() {
       setUpperPriceInput("");
       return;
     }
-    setLowerPriceInput(String(Number(simulation.lowerPrice.toPrecision(7))));
-    setUpperPriceInput(String(Number(simulation.upperPrice.toPrecision(7))));
-  }, [rangePreset, simulation]);
+    setLowerPriceInput(String(Number(displayLowerPrice.toPrecision(7))));
+    setUpperPriceInput(String(Number(displayUpperPrice.toPrecision(7))));
+  }, [displayLowerPrice, displayUpperPrice, rangePreset, simulation]);
 
   useEffect(() => {
     setMintPlan(null);
@@ -495,9 +625,14 @@ export function FarmScanner() {
 
   function openFarm(farm: FarmOpportunity) {
     setSelectedAddress(farm.poolAddress);
-    setLowerPercent(25);
-    setUpperPercent(25);
+    setLowerPercent(30);
+    setUpperPercent(30);
     setRangePreset("wide");
+    setQuoteToken(1);
+    setChartMetric("price");
+    setChartWindow("all");
+    setLiquidityZoom(1);
+    setShowIlSimulation(false);
   }
 
   function selectPreset(preset: RangePreset) {
@@ -506,22 +641,66 @@ export function FarmScanner() {
       setLowerPercent(5);
       setUpperPercent(5);
     } else if (preset === "wide") {
-      setLowerPercent(25);
-      setUpperPercent(25);
+      setLowerPercent(30);
+      setUpperPercent(30);
     }
   }
 
   function commitLowerPrice(next: number) {
     if (!selected || !Number.isFinite(next) || next <= 0) return;
-    const change = (1 - next / selected.priceToken1PerToken0) * 100;
-    setLowerPercent(Math.min(99.9, Math.max(0.1, change)));
+    if (invertedQuote) {
+      const underlyingUpper = 1 / next;
+      const change =
+        (underlyingUpper / selected.priceToken1PerToken0 - 1) * 100;
+      setUpperPercent(Math.min(500, Math.max(0.1, change)));
+    } else {
+      const change = (1 - next / selected.priceToken1PerToken0) * 100;
+      setLowerPercent(Math.min(99.9, Math.max(0.1, change)));
+    }
     setRangePreset("custom");
   }
 
   function commitUpperPrice(next: number) {
     if (!selected || !Number.isFinite(next) || next <= 0) return;
-    const change = (next / selected.priceToken1PerToken0 - 1) * 100;
-    setUpperPercent(Math.min(500, Math.max(0.1, change)));
+    if (invertedQuote) {
+      const underlyingLower = 1 / next;
+      const change =
+        (1 - underlyingLower / selected.priceToken1PerToken0) * 100;
+      setLowerPercent(Math.min(99.9, Math.max(0.1, change)));
+    } else {
+      const change = (next / selected.priceToken1PerToken0 - 1) * 100;
+      setUpperPercent(Math.min(500, Math.max(0.1, change)));
+    }
+    setRangePreset("custom");
+  }
+
+  function resetSimulator() {
+    setDepositUsd(1_000);
+    setLowerPercent(30);
+    setUpperPercent(30);
+    setRangePreset("wide");
+    setRangeInputMode("price");
+    setQuoteToken(1);
+    setSlippageBps(100);
+    setFuturePriceChange(20);
+    setShowIlSimulation(false);
+  }
+
+  function applyAutoRange() {
+    if (!selected) return;
+    const prices = selected.sampledTicks.map((tick) =>
+      priceAtTick(tick, selected.token0.decimals, selected.token1.decimals),
+    );
+    const low = prices.length
+      ? Math.min(...prices)
+      : selected.priceToken1PerToken0;
+    const high = prices.length
+      ? Math.max(...prices)
+      : selected.priceToken1PerToken0;
+    const lower = (1 - low / selected.priceToken1PerToken0) * 100 * 1.75 + 2;
+    const upper = (high / selected.priceToken1PerToken0 - 1) * 100 * 1.75 + 2;
+    setLowerPercent(Math.min(80, Math.max(3, lower)));
+    setUpperPercent(Math.min(200, Math.max(3, upper)));
     setRangePreset("custom");
   }
 
@@ -632,6 +811,22 @@ export function FarmScanner() {
   }
 
   const nextStep = mintPlan?.steps.find((step) => !submitted[step.ordinal]);
+  const annualFees = simulation?.estimatedAnnualFeesUsd ?? null;
+  const dailyFees = annualFees == null ? null : annualFees / 365;
+  const monthlyFees = annualFees == null ? null : annualFees / 12;
+  const token0DepositUsd =
+    simulation && selected?.token0.priceUsd != null
+      ? simulation.amount0 * selected.token0.priceUsd
+      : 0;
+  const token1DepositUsd =
+    simulation && selected?.token1.priceUsd != null
+      ? simulation.amount1 * selected.token1.priceUsd
+      : 0;
+  const depositValue = token0DepositUsd + token1DepositUsd;
+  const token0DepositPercent =
+    depositValue > 0 ? (token0DepositUsd / depositValue) * 100 : 0;
+  const token1DepositPercent =
+    depositValue > 0 ? (token1DepositUsd / depositValue) * 100 : 0;
   const activeFilterCount = Object.entries(filters).filter(([key, value]) =>
     key === "fee" ? value !== "ALL" : value !== "",
   ).length;
@@ -986,7 +1181,7 @@ export function FarmScanner() {
               <TokenPair farm={selected} />
               <div className="pool-head-metrics">
                 <span>
-                  Price <b>{price(selected.token0.priceUsd)}</b>
+                  Pair price <b>{price(currentDisplayPrice)}</b>
                 </span>
                 <span>
                   TVL <b>{money(selected.tvlUsd)}</b>
@@ -1018,23 +1213,67 @@ export function FarmScanner() {
 
             <div className="pool-modal-body">
               <div className="pool-chart-column">
+                <div className="chart-control-row">
+                  <div className="metric-tabs" aria-label="Chart metric">
+                    {(
+                      ["price", "apr", "tvl", "volume", "fee"] as ChartMetric[]
+                    ).map((metric) => (
+                      <button
+                        type="button"
+                        key={metric}
+                        className={chartMetric === metric ? "active" : ""}
+                        onClick={() => setChartMetric(metric)}
+                      >
+                        {metric}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="window-tabs" aria-label="Chart sample window">
+                    {([5, 15, 30, "all"] as ChartWindow[]).map((window) => (
+                      <button
+                        type="button"
+                        key={window}
+                        className={chartWindow === window ? "active" : ""}
+                        onClick={() => setChartWindow(window)}
+                      >
+                        {window === "all" ? "All" : window + "m"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="chart-head">
                   <div>
-                    <span>Observed pool price</span>
+                    <span>
+                      {chartMetric === "price"
+                        ? "Observed pool price"
+                        : "Current projected " + chartMetric}
+                    </span>
                     <strong>
-                      {selected.priceToken1PerToken0.toLocaleString(undefined, {
-                        maximumSignificantDigits: 7,
-                      })}{" "}
-                      {selected.token1.symbol}
+                      {formatMetric(
+                        chartMetric,
+                        chartMetric === "price"
+                          ? currentDisplayPrice
+                          : chartMetric === "apr"
+                            ? selected.projectedPoolApr
+                            : chartMetric === "tvl"
+                              ? selected.tvlUsd
+                              : chartMetric === "volume"
+                                ? selected.volume24hProjectedUsd
+                                : selected.feePercent,
+                      )}{" "}
+                      {chartMetric === "price"
+                        ? quoteSymbol + " per " + baseSymbol
+                        : ""}
                     </strong>
                   </div>
-                  <div className="chart-range-label">
-                    <span>Active range</span>
-                    <strong>
-                      {price(simulation.lowerPrice)} -{" "}
-                      {price(simulation.upperPrice)}
-                    </strong>
-                  </div>
+                  {chartMetric === "price" && (
+                    <div className="chart-range-label">
+                      <span>Active range</span>
+                      <strong>
+                        {price(displayLowerPrice)} - {price(displayUpperPrice)}
+                      </strong>
+                    </div>
+                  )}
                 </div>
                 <div className="price-chart">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1069,31 +1308,37 @@ export function FarmScanner() {
                         tick={{ fill: "#69756e", fontSize: 9 }}
                         tickLine={false}
                         axisLine={false}
-                        tickFormatter={(value) => price(Number(value))}
+                        tickFormatter={(value) =>
+                          formatMetric(chartMetric, Number(value))
+                        }
                         domain={["auto", "auto"]}
                       />
                       <Tooltip
-                        content={<PriceTooltip />}
+                        content={<MetricTooltip metric={chartMetric} />}
                         cursor={{ stroke: "#58645d", strokeDasharray: "3 3" }}
                       />
-                      <ReferenceArea
-                        y1={chartBand.low}
-                        y2={chartBand.high}
-                        fill="#00d632"
-                        fillOpacity={0.08}
-                        stroke="#00d632"
-                        strokeOpacity={0.35}
-                        ifOverflow="hidden"
-                      />
-                      <ReferenceLine
-                        y={selected.priceToken1PerToken0}
-                        stroke="#f2f5f3"
-                        strokeDasharray="3 3"
-                        ifOverflow="extendDomain"
-                      />
+                      {chartMetric === "price" && (
+                        <>
+                          <ReferenceArea
+                            y1={chartBand.low}
+                            y2={chartBand.high}
+                            fill="#00d632"
+                            fillOpacity={0.08}
+                            stroke="#00d632"
+                            strokeOpacity={0.35}
+                            ifOverflow="hidden"
+                          />
+                          <ReferenceLine
+                            y={currentDisplayPrice}
+                            stroke="#f2f5f3"
+                            strokeDasharray="3 3"
+                            ifOverflow="extendDomain"
+                          />
+                        </>
+                      )}
                       <Area
                         type="monotone"
-                        dataKey="price"
+                        dataKey="value"
                         stroke="#00d632"
                         strokeWidth={1.5}
                         fill="url(#poolPriceFill)"
@@ -1104,11 +1349,16 @@ export function FarmScanner() {
                 </div>
                 <div className="chart-legend">
                   <span>
-                    <i className="price-line" /> Recent price
+                    <i className="price-line" />{" "}
+                    {chartMetric === "price"
+                      ? "Observed swap prices"
+                      : "Current snapshot across selected window"}
                   </span>
-                  <span>
-                    <i className="range-area" /> Simulated active range
-                  </span>
+                  {chartMetric === "price" && (
+                    <span>
+                      <i className="range-area" /> Simulated active range
+                    </span>
+                  )}
                   <span>
                     {selected.sampledTicks.length} samples /{" "}
                     {Math.round(selected.sampleMinutes)}m
@@ -1121,12 +1371,34 @@ export function FarmScanner() {
                       <span>Liquidity distribution</span>
                       <strong>Initialized V3 ticks around current price</strong>
                     </div>
-                    {distribution && (
-                      <span>
-                        {distribution.points.length} ticks · block{" "}
-                        {Number(distribution.blockNumber).toLocaleString()}
-                      </span>
-                    )}
+                    <div className="liquidity-chart-tools">
+                      {distribution && (
+                        <span>
+                          {liquidityChartData.length} /{" "}
+                          {distribution.points.length} ticks
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLiquidityZoom((value) => Math.max(1, value / 2))
+                        }
+                        disabled={liquidityZoom === 1}
+                        aria-label="Zoom liquidity chart out"
+                      >
+                        <ZoomOut size={11} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLiquidityZoom((value) => Math.min(4, value * 2))
+                        }
+                        disabled={liquidityZoom === 4}
+                        aria-label="Zoom liquidity chart in"
+                      >
+                        <ZoomIn size={11} />
+                      </button>
+                    </div>
                   </div>
                   {distributionLoading ? (
                     <div className="liquidity-chart-state">
@@ -1137,11 +1409,11 @@ export function FarmScanner() {
                     <div className="liquidity-chart-state error-state">
                       {distributionError}
                     </div>
-                  ) : distribution?.points.length ? (
+                  ) : liquidityChartData.length ? (
                     <div className="liquidity-chart">
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart
-                          data={distribution.points}
+                          data={liquidityChartData}
                           margin={{ top: 8, right: 8, bottom: 2, left: 8 }}
                         >
                           <defs>
@@ -1178,8 +1450,8 @@ export function FarmScanner() {
                           <YAxis hide domain={[0, "dataMax"]} />
                           <Tooltip content={<LiquidityTooltip />} />
                           <ReferenceArea
-                            x1={simulation.lowerPrice}
-                            x2={simulation.upperPrice}
+                            x1={displayLowerPrice}
+                            x2={displayUpperPrice}
                             fill="#00d632"
                             fillOpacity={0.08}
                             stroke="#00d632"
@@ -1187,19 +1459,19 @@ export function FarmScanner() {
                             ifOverflow="hidden"
                           />
                           <ReferenceLine
-                            x={simulation.lowerPrice}
+                            x={displayLowerPrice}
                             stroke="#00f08a"
                             strokeWidth={1.5}
                             ifOverflow="hidden"
                           />
                           <ReferenceLine
-                            x={selected.priceToken1PerToken0}
+                            x={currentDisplayPrice}
                             stroke="#f3cf45"
                             strokeWidth={1.2}
                             ifOverflow="hidden"
                           />
                           <ReferenceLine
-                            x={simulation.upperPrice}
+                            x={displayUpperPrice}
                             stroke="#00f08a"
                             strokeWidth={1.5}
                             ifOverflow="hidden"
@@ -1223,15 +1495,15 @@ export function FarmScanner() {
                   <div className="liquidity-range-legend">
                     <span>
                       <i className="range-bound-line" /> MIN{" "}
-                      {price(simulation.lowerPrice)}
+                      {price(displayLowerPrice)}
                     </span>
                     <span>
                       <i className="current-price-line" /> CURRENT{" "}
-                      {price(selected.priceToken1PerToken0)}
+                      {price(currentDisplayPrice)}
                     </span>
                     <span>
                       <i className="range-bound-line" /> MAX{" "}
-                      {price(simulation.upperPrice)}
+                      {price(displayUpperPrice)}
                     </span>
                   </div>
                 </div>
@@ -1276,10 +1548,57 @@ export function FarmScanner() {
               <aside className="range-panel">
                 <div className="range-panel-title">
                   <div>
-                    <span>Range simulator</span>
+                    <span>Fee simulation</span>
                     <strong>Configure position</strong>
                   </div>
-                  <span className="fee-chip">{selected.feePercent}% fee</span>
+                  <div className="sim-title-actions">
+                    <span className="fee-chip">{selected.feePercent}% fee</span>
+                    <button
+                      type="button"
+                      onClick={resetSimulator}
+                      aria-label="Reset simulator"
+                    >
+                      <RotateCcw size={11} /> Reset
+                    </button>
+                  </div>
+                </div>
+
+                <div className="sim-toggle-row">
+                  <div className="sim-toggle" aria-label="Range input mode">
+                    <button
+                      type="button"
+                      className={rangeInputMode === "percent" ? "active" : ""}
+                      onClick={() => setRangeInputMode("percent")}
+                    >
+                      %
+                    </button>
+                    <button
+                      type="button"
+                      className={rangeInputMode === "price" ? "active" : ""}
+                      onClick={() => setRangeInputMode("price")}
+                    >
+                      #
+                    </button>
+                  </div>
+                  <div
+                    className="sim-toggle token-toggle"
+                    aria-label="Quote token"
+                  >
+                    <button
+                      type="button"
+                      className={quoteToken === 0 ? "active" : ""}
+                      onClick={() => setQuoteToken(0)}
+                    >
+                      {selected.token0.symbol}
+                    </button>
+                    <button
+                      type="button"
+                      className={quoteToken === 1 ? "active" : ""}
+                      onClick={() => setQuoteToken(1)}
+                    >
+                      {selected.token1.symbol}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="preset-tabs" aria-label="Range presets">
@@ -1291,82 +1610,200 @@ export function FarmScanner() {
                         className={rangePreset === preset ? "active" : ""}
                         onClick={() => selectPreset(preset)}
                       >
-                        {preset}
+                        {preset === "small" ? "Narrow" : preset}
                       </button>
                     ),
                   )}
                 </div>
 
-                <label className="deposit-input">
-                  <span>Deposit value</span>
-                  <div>
-                    <b>$</b>
-                    <input
-                      type="number"
-                      min="10"
-                      step="100"
-                      value={depositUsd}
-                      onChange={(event) =>
-                        setDepositUsd(Math.max(0, Number(event.target.value)))
-                      }
-                    />
-                    <em>USD</em>
+                {rangeInputMode === "price" ? (
+                  <div className="price-bound-inputs">
+                    <label>
+                      <span>Lower price</span>
+                      <div className="bound-input-control">
+                        <button
+                          type="button"
+                          disabled={rangePreset === "full"}
+                          onClick={() =>
+                            commitLowerPrice(
+                              displayLowerPrice - currentDisplayPrice * 0.01,
+                            )
+                          }
+                        >
+                          <Minus size={11} />
+                        </button>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={rangePreset === "full"}
+                          value={lowerPriceInput}
+                          placeholder="Full range"
+                          onChange={(event) =>
+                            setLowerPriceInput(event.target.value)
+                          }
+                          onBlur={() =>
+                            commitLowerPrice(Number(lowerPriceInput))
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter")
+                              event.currentTarget.blur();
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={rangePreset === "full"}
+                          onClick={() =>
+                            commitLowerPrice(
+                              displayLowerPrice + currentDisplayPrice * 0.01,
+                            )
+                          }
+                        >
+                          <Plus size={11} />
+                        </button>
+                      </div>
+                      <small>
+                        {quoteSymbol} per {baseSymbol}
+                      </small>
+                    </label>
+                    <label>
+                      <span>Upper price</span>
+                      <div className="bound-input-control">
+                        <button
+                          type="button"
+                          disabled={rangePreset === "full"}
+                          onClick={() =>
+                            commitUpperPrice(
+                              displayUpperPrice - currentDisplayPrice * 0.01,
+                            )
+                          }
+                        >
+                          <Minus size={11} />
+                        </button>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          disabled={rangePreset === "full"}
+                          value={upperPriceInput}
+                          placeholder="Full range"
+                          onChange={(event) =>
+                            setUpperPriceInput(event.target.value)
+                          }
+                          onBlur={() =>
+                            commitUpperPrice(Number(upperPriceInput))
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter")
+                              event.currentTarget.blur();
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={rangePreset === "full"}
+                          onClick={() =>
+                            commitUpperPrice(
+                              displayUpperPrice + currentDisplayPrice * 0.01,
+                            )
+                          }
+                        >
+                          <Plus size={11} />
+                        </button>
+                      </div>
+                      <small>
+                        {quoteSymbol} per {baseSymbol}
+                      </small>
+                    </label>
                   </div>
-                </label>
+                ) : (
+                  <div className="percent-bound-inputs">
+                    <label>
+                      <span>Below current</span>
+                      <div>
+                        <input
+                          type="number"
+                          min="0.1"
+                          max="99.9"
+                          step="0.1"
+                          value={invertedQuote ? upperPercent : lowerPercent}
+                          disabled={rangePreset === "full"}
+                          onChange={(event) => {
+                            if (invertedQuote) {
+                              setUpperPercent(Number(event.target.value));
+                            } else {
+                              setLowerPercent(Number(event.target.value));
+                            }
+                            setRangePreset("custom");
+                          }}
+                        />
+                        <b>%</b>
+                      </div>
+                    </label>
+                    <label>
+                      <span>Above current</span>
+                      <div>
+                        <input
+                          type="number"
+                          min="0.1"
+                          max="500"
+                          step="0.1"
+                          value={invertedQuote ? lowerPercent : upperPercent}
+                          disabled={rangePreset === "full"}
+                          onChange={(event) => {
+                            if (invertedQuote) {
+                              setLowerPercent(Number(event.target.value));
+                            } else {
+                              setUpperPercent(Number(event.target.value));
+                            }
+                            setRangePreset("custom");
+                          }}
+                        />
+                        <b>%</b>
+                      </div>
+                    </label>
+                  </div>
+                )}
 
-                <div className="price-bound-inputs">
-                  <label>
-                    <span>Lower price</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="any"
-                      disabled={rangePreset === "full"}
-                      value={lowerPriceInput}
-                      placeholder="Full range"
-                      onChange={(event) =>
-                        setLowerPriceInput(event.target.value)
-                      }
-                      onBlur={() => commitLowerPrice(Number(lowerPriceInput))}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.currentTarget.blur();
-                      }}
-                    />
-                  </label>
-                  <label>
-                    <span>Upper price</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="any"
-                      disabled={rangePreset === "full"}
-                      value={upperPriceInput}
-                      placeholder="Full range"
-                      onChange={(event) =>
-                        setUpperPriceInput(event.target.value)
-                      }
-                      onBlur={() => commitUpperPrice(Number(upperPriceInput))}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.currentTarget.blur();
-                      }}
-                    />
-                  </label>
+                <div className="range-overview">
+                  <div className="range-overview-current">
+                    Current {price(currentDisplayPrice)} {quoteSymbol} per{" "}
+                    {baseSymbol}
+                  </div>
+                  <div className="range-overview-track">
+                    <span className="range-overview-fill" />
+                    <i className="min-marker">MIN</i>
+                    <i
+                      className="current-marker"
+                      style={{ left: currentRangePosition + "%" }}
+                    >
+                      Current
+                    </i>
+                    <i className="max-marker">MAX</i>
+                  </div>
                 </div>
 
                 <div className="range-slider-control">
                   <div>
                     <span>Lower boundary</span>
-                    <b>-{lowerPercent.toFixed(1)}%</b>
+                    <b>
+                      -
+                      {(invertedQuote ? upperPercent : lowerPercent).toFixed(1)}
+                      %
+                    </b>
                   </div>
                   <input
                     type="range"
                     min="0.1"
                     max="95"
                     step="0.1"
-                    value={lowerPercent}
+                    value={invertedQuote ? upperPercent : lowerPercent}
                     disabled={rangePreset === "full"}
                     onChange={(event) => {
-                      setLowerPercent(Number(event.target.value));
+                      if (invertedQuote) {
+                        setUpperPercent(Number(event.target.value));
+                      } else {
+                        setLowerPercent(Number(event.target.value));
+                      }
                       setRangePreset("custom");
                     }}
                   />
@@ -1374,17 +1811,25 @@ export function FarmScanner() {
                 <div className="range-slider-control">
                   <div>
                     <span>Upper boundary</span>
-                    <b>+{upperPercent.toFixed(1)}%</b>
+                    <b>
+                      +
+                      {(invertedQuote ? lowerPercent : upperPercent).toFixed(1)}
+                      %
+                    </b>
                   </div>
                   <input
                     type="range"
                     min="0.1"
                     max="200"
                     step="0.1"
-                    value={upperPercent}
+                    value={invertedQuote ? lowerPercent : upperPercent}
                     disabled={rangePreset === "full"}
                     onChange={(event) => {
-                      setUpperPercent(Number(event.target.value));
+                      if (invertedQuote) {
+                        setLowerPercent(Number(event.target.value));
+                      } else {
+                        setUpperPercent(Number(event.target.value));
+                      }
                       setRangePreset("custom");
                     }}
                   />
@@ -1398,6 +1843,140 @@ export function FarmScanner() {
                     Upper tick <b>{simulation.tickUpper.toLocaleString()}</b>
                   </span>
                 </div>
+
+                <div className="liquidity-input-section">
+                  <label className="deposit-input">
+                    <span>Liquidity</span>
+                    <div>
+                      <b>$</b>
+                      <input
+                        type="number"
+                        min="10"
+                        step="100"
+                        value={depositUsd}
+                        onChange={(event) =>
+                          setDepositUsd(Math.max(0, Number(event.target.value)))
+                        }
+                      />
+                      <em>USD</em>
+                    </div>
+                  </label>
+                  <div className="token-allocation-list">
+                    <div>
+                      <span>
+                        <i>{selected.token0.symbol.slice(0, 1)}</i>
+                        {selected.token0.symbol}
+                      </span>
+                      <strong>
+                        {amount(simulation.amount0, selected.token0.decimals)}{" "}
+                        <small>{money(token0DepositUsd, false)}</small>
+                      </strong>
+                      <b>{token0DepositPercent.toFixed(1)}%</b>
+                    </div>
+                    <div>
+                      <span>
+                        <i>{selected.token1.symbol.slice(0, 1)}</i>
+                        {selected.token1.symbol}
+                      </span>
+                      <strong>
+                        {amount(simulation.amount1, selected.token1.decimals)}{" "}
+                        <small>{money(token1DepositUsd, false)}</small>
+                      </strong>
+                      <b>{token1DepositPercent.toFixed(1)}%</b>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="earnings-table">
+                  <div className="earnings-title">
+                    <span>Estimated earnings (24h)</span>
+                    <strong>{money(dailyFees, false)}</strong>
+                  </div>
+                  <div>
+                    <span>Monthly</span>
+                    <strong>{money(monthlyFees, false)}</strong>
+                    <b>
+                      {percent(
+                        simulation.estimatedApr == null
+                          ? null
+                          : simulation.estimatedApr / 12,
+                        2,
+                      )}
+                    </b>
+                  </div>
+                  <div>
+                    <span>Yearly / APR</span>
+                    <strong>{money(annualFees, false)}</strong>
+                    <b>{percent(simulation.estimatedApr, 2)}</b>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="il-toggle"
+                  onClick={() => setShowIlSimulation((value) => !value)}
+                  aria-expanded={showIlSimulation}
+                >
+                  IL simulation
+                  <span>{showIlSimulation ? "Hide" : "Open"}</span>
+                </button>
+                {showIlSimulation && ilSimulation && (
+                  <div className="il-simulator">
+                    <div>
+                      <span>Future price move</span>
+                      <b>
+                        {futurePriceChange > 0 ? "+" : ""}
+                        {futurePriceChange}%
+                      </b>
+                    </div>
+                    <input
+                      type="range"
+                      min="-80"
+                      max="200"
+                      step="1"
+                      value={futurePriceChange}
+                      onChange={(event) =>
+                        setFuturePriceChange(Number(event.target.value))
+                      }
+                    />
+                    <dl>
+                      <div>
+                        <dt>Future pair price</dt>
+                        <dd>
+                          {price(
+                            invertedQuote
+                              ? 1 / ilSimulation.futurePrice
+                              : ilSimulation.futurePrice,
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>LP value</dt>
+                        <dd>{money(ilSimulation.positionValueUsd, false)}</dd>
+                      </div>
+                      <div>
+                        <dt>Hold value</dt>
+                        <dd>{money(ilSimulation.holdValueUsd, false)}</dd>
+                      </div>
+                      <div>
+                        <dt>Impermanent loss</dt>
+                        <dd
+                          className={
+                            ilSimulation.impermanentLossPercent < 0
+                              ? "negative"
+                              : ""
+                          }
+                        >
+                          {percent(ilSimulation.impermanentLossPercent, 2)}
+                        </dd>
+                      </div>
+                    </dl>
+                    <p>
+                      Excludes fees and assumes the USD value of{" "}
+                      {selected.token1.symbol} stays constant.
+                    </p>
+                  </div>
+                )}
 
                 <label className="compact-slippage">
                   <span>
@@ -1414,6 +1993,14 @@ export function FarmScanner() {
                     }
                   />
                 </label>
+
+                <button
+                  type="button"
+                  className="auto-range-button"
+                  onClick={applyAutoRange}
+                >
+                  <Sparkles size={13} /> Auto range from observed volatility
+                </button>
 
                 {!wallet.address ? (
                   <button
@@ -1446,7 +2033,7 @@ export function FarmScanner() {
                     ) : (
                       <ArrowUpRight size={14} />
                     )}
-                    Review transactions
+                    Add liquidity
                   </button>
                 ) : (
                   <div className="compact-mint-plan">

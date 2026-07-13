@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   priceAtTick,
   simulateFullRange,
+  simulateImpermanentLoss,
   simulateRange,
   type FarmOpportunity,
 } from "@/src/domain/farms";
@@ -80,5 +81,18 @@ describe("farm range simulation", () => {
     expect(Math.abs(result.tickLower % farm.tickSpacing)).toBe(0);
     expect(Math.abs(result.tickUpper % farm.tickSpacing)).toBe(0);
     expect(result.capitalEfficiency).toBeCloseTo(1, 3);
+  });
+
+  it("compares a future concentrated position with holding the initial tokens", () => {
+    const range = simulateRange(farm, 10_000, 15, 15);
+    const unchanged = simulateImpermanentLoss(farm, range, 0);
+    const moved = simulateImpermanentLoss(farm, range, 50);
+
+    expect(unchanged).not.toBeNull();
+    expect(unchanged!.positionValueUsd).toBeCloseTo(unchanged!.holdValueUsd, 6);
+    expect(unchanged!.impermanentLossPercent).toBeCloseTo(0, 6);
+    expect(moved).not.toBeNull();
+    expect(moved!.futurePrice).toBeCloseTo(farm.priceToken1PerToken0 * 1.5, 6);
+    expect(moved!.impermanentLossPercent).toBeLessThan(0);
   });
 });

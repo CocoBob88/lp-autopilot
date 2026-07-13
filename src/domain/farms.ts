@@ -71,11 +71,21 @@ export type RangeSimulation = {
   upperPrice: number;
   amount0: number;
   amount1: number;
+  positionLiquidity: number;
   shareOfActiveLiquidity: number;
   observedRangeActivity: number;
   estimatedAnnualFeesUsd: number | null;
   estimatedApr: number | null;
   capitalEfficiency: number;
+};
+
+export type ImpermanentLossSimulation = {
+  futurePrice: number;
+  amount0: number;
+  amount1: number;
+  positionValueUsd: number;
+  holdValueUsd: number;
+  impermanentLossPercent: number;
 };
 
 function alignTick(value: number, spacing: number, direction: "down" | "up") {
@@ -150,31 +160,18 @@ export function simulateTickRange(
     farm.token0.decimals,
     farm.token1.decimals,
   );
-  const sqrtPrice = Math.sqrt(Math.pow(1.0001, farm.tick));
-  const sqrtLower = Math.sqrt(Math.pow(1.0001, tickLower));
-  const sqrtUpper = Math.sqrt(Math.pow(1.0001, tickUpper));
-  const amount0RawPerLiquidity =
-    farm.tick < tickLower
-      ? (sqrtUpper - sqrtLower) / (sqrtLower * sqrtUpper)
-      : farm.tick >= tickUpper
-        ? 0
-        : (sqrtUpper - sqrtPrice) / (sqrtPrice * sqrtUpper);
-  const amount1RawPerLiquidity =
-    farm.tick < tickLower
-      ? 0
-      : farm.tick >= tickUpper
-        ? sqrtUpper - sqrtLower
-        : sqrtPrice - sqrtLower;
-  const amount0PerLiquidity =
-    amount0RawPerLiquidity / Math.pow(10, farm.token0.decimals);
-  const amount1PerLiquidity =
-    amount1RawPerLiquidity / Math.pow(10, farm.token1.decimals);
+  const unitAmounts = amountsAtTick(farm, tickLower, tickUpper, farm.tick, 1);
   const unitValueUsd =
-    amount0PerLiquidity * (farm.token0.priceUsd ?? 0) +
-    amount1PerLiquidity * (farm.token1.priceUsd ?? 0);
+    unitAmounts.amount0 * (farm.token0.priceUsd ?? 0) +
+    unitAmounts.amount1 * (farm.token1.priceUsd ?? 0);
   const positionLiquidity = unitValueUsd > 0 ? depositUsd / unitValueUsd : 0;
-  const amount0 = amount0PerLiquidity * positionLiquidity;
-  const amount1 = amount1PerLiquidity * positionLiquidity;
+  const { amount0, amount1 } = amountsAtTick(
+    farm,
+    tickLower,
+    tickUpper,
+    farm.tick,
+    positionLiquidity,
+  );
   const poolLiquidity = Number(farm.liquidity);
   const shareOfActiveLiquidity =
     positionLiquidity > 0
@@ -207,10 +204,83 @@ export function simulateTickRange(
     upperPrice,
     amount0,
     amount1,
+    positionLiquidity,
     shareOfActiveLiquidity,
     observedRangeActivity,
     estimatedAnnualFeesUsd,
     estimatedApr,
     capitalEfficiency,
+  };
+}
+
+function amountsAtTick(
+  farm: FarmOpportunity,
+  tickLower: number,
+  tickUpper: number,
+  tick: number,
+  liquidity: number,
+) {
+  const sqrtPrice = Math.sqrt(Math.pow(1.0001, tick));
+  const sqrtLower = Math.sqrt(Math.pow(1.0001, tickLower));
+  const sqrtUpper = Math.sqrt(Math.pow(1.0001, tickUpper));
+  const amount0RawPerLiquidity =
+    tick < tickLower
+      ? (sqrtUpper - sqrtLower) / (sqrtLower * sqrtUpper)
+      : tick >= tickUpper
+        ? 0
+        : (sqrtUpper - sqrtPrice) / (sqrtPrice * sqrtUpper);
+  const amount1RawPerLiquidity =
+    tick < tickLower
+      ? 0
+      : tick >= tickUpper
+        ? sqrtUpper - sqrtLower
+        : sqrtPrice - sqrtLower;
+  return {
+    amount0:
+      (amount0RawPerLiquidity / Math.pow(10, farm.token0.decimals)) * liquidity,
+    amount1:
+      (amount1RawPerLiquidity / Math.pow(10, farm.token1.decimals)) * liquidity,
+  };
+}
+
+export function simulateImpermanentLoss(
+  farm: FarmOpportunity,
+  simulation: RangeSimulation,
+  futurePriceChangePercent: number,
+): ImpermanentLossSimulation | null {
+  if (farm.token1.priceUsd == null || farm.token1.priceUsd <= 0) return null;
+  const futurePrice = Math.max(
+    Number.MIN_VALUE,
+    farm.priceToken1PerToken0 * (1 + futurePriceChangePercent / 100),
+  );
+  const decimalScale = Math.pow(
+    10,
+    farm.token0.decimals - farm.token1.decimals,
+  );
+  const futureTick = Math.max(
+    -887272,
+    Math.min(887272, Math.log(futurePrice / decimalScale) / Math.log(1.0001)),
+  );
+  const { amount0, amount1 } = amountsAtTick(
+    farm,
+    simulation.tickLower,
+    simulation.tickUpper,
+    futureTick,
+    simulation.positionLiquidity,
+  );
+  const futureToken1Usd = farm.token1.priceUsd;
+  const futureToken0Usd = futurePrice * futureToken1Usd;
+  const positionValueUsd =
+    amount0 * futureToken0Usd + amount1 * futureToken1Usd;
+  const holdValueUsd =
+    simulation.amount0 * futureToken0Usd + simulation.amount1 * futureToken1Usd;
+  return {
+    futurePrice,
+    amount0,
+    amount1,
+    positionValueUsd,
+    holdValueUsd,
+    impermanentLossPercent:
+      holdValueUsd > 0 ? (positionValueUsd / holdValueUsd - 1) * 100 : 0,
   };
 }
