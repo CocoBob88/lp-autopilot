@@ -253,10 +253,14 @@ function LiquidityTooltip({
   );
 }
 
-export function FarmScanner() {
+export function FarmScanner({
+  initialData = null,
+}: {
+  initialData?: FarmScannerResponse | null;
+}) {
   const wallet = useWallet();
-  const [data, setData] = useState<FarmScannerResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<FarmScannerResponse | null>(initialData);
+  const [loading, setLoading] = useState(!initialData);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -326,12 +330,12 @@ export function FarmScanner() {
   }, []);
 
   useEffect(() => {
-    void load();
+    if (!initialData) void load();
     const timer = window.setInterval(() => {
       if (!document.hidden) void load(undefined, true);
-    }, 75_000);
+    }, 120_000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [initialData, load]);
 
   useEffect(() => {
     if (!selectedAddress) return;
@@ -1035,14 +1039,14 @@ export function FarmScanner() {
         <span>
           <i /> Live mainnet
         </span>
-        <span>
+        <span suppressHydrationWarning>
           <Clock3 size={11} />
           {data ? new Date(data.updatedAt).toLocaleTimeString() : "-"}
         </span>
         <span>
           APR projection: {Math.round(data?.sampleMinutes ?? 0)}m sample
         </span>
-        <span>Refresh: {data?.refreshAfterSeconds ?? 75}s</span>
+        <span>Refresh: {data?.refreshAfterSeconds ?? 120}s</span>
         <span>TVL floor: {money(data?.minimumTvlUsd ?? 1_000, false)}</span>
         {data?.databaseBacked && (
           <span>Catalog: {data.catalogSize.toLocaleString()} stored pools</span>
@@ -1065,7 +1069,7 @@ export function FarmScanner() {
           <div className="dense-state">
             <LoaderCircle className="spin" size={20} />
             <strong>Loading live pools</strong>
-            <span>Reading mainnet liquidity and activity...</span>
+            <span>Loading the latest stored pool snapshot...</span>
           </div>
         ) : error ? (
           <div className="dense-state error-state">

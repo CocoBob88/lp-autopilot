@@ -1,4 +1,5 @@
 import { formatUnits, getAddress, zeroAddress, type Address } from "viem";
+import type { Prisma } from "@prisma/client";
 import { mainnetManifest, MAINNET_CHAIN_ID } from "@/src/chains/robinhood";
 import {
   erc20Abi,
@@ -16,7 +17,7 @@ import {
 import { getPublicClient } from "@/src/lib/client";
 import { databaseConfigured, prisma } from "@/src/lib/db";
 
-const refreshSeconds = 75;
+const refreshSeconds = 120;
 const activityWindowBlocks = 2_500n;
 const metricWindowBlocks = 20_000n;
 const minimumTvlUsd = 1_000;
@@ -130,6 +131,91 @@ async function persistPoolCatalog(pools: PoolBase[]) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function persistFarmSnapshots(farms: FarmOpportunity[]) {
+  if (!databaseConfigured() || !farms.length) return false;
+  try {
+    await mapLimit(farms, 12, (farm) =>
+      prisma.pool.updateMany({
+        where: {
+          chainId: MAINNET_CHAIN_ID,
+          address: farm.poolAddress.toLowerCase(),
+        },
+        data: {
+          snapshot: farm as unknown as Prisma.InputJsonValue,
+          snapshotAt: new Date(farm.updatedAt),
+        },
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isFarmSnapshot(value: unknown): value is FarmOpportunity {
+  if (!value || typeof value !== "object") return false;
+  const farm = value as Partial<FarmOpportunity>;
+  return Boolean(
+    farm.poolAddress &&
+      /^0x[0-9a-fA-F]{40}$/.test(farm.poolAddress) &&
+      farm.token0?.address &&
+      farm.token1?.address &&
+      typeof farm.updatedAt === "string" &&
+      typeof farm.blockNumber === "string",
+  );
+}
+
+function sortFarms(farms: FarmOpportunity[]) {
+  farms.sort((a, b) => {
+    const priced = Number(b.tvlUsd != null) - Number(a.tvlUsd != null);
+    if (priced) return priced;
+    return (
+      (b.volume24hProjectedUsd ?? b.activityScore) -
+      (a.volume24hProjectedUsd ?? a.activityScore)
+    );
+  });
+  return farms;
+}
+
+export async function getStoredFarmScanner(): Promise<FarmScannerResponse | null> {
+  if (!databaseConfigured()) return null;
+  try {
+    const [stored, catalogSize] = await Promise.all([
+      prisma.pool.findMany({
+        where: { chainId: MAINNET_CHAIN_ID },
+        orderBy: { snapshotAt: "desc" },
+        take: maxCatalogCandidates,
+        select: { snapshot: true },
+      }),
+      prisma.pool.count({ where: { chainId: MAINNET_CHAIN_ID } }),
+    ]);
+    const farms = sortFarms(
+      stored
+        .map(({ snapshot }) => snapshot)
+        .filter(isFarmSnapshot)
+        .filter((farm) => farm.tvlUsd != null && farm.tvlUsd >= minimumTvlUsd),
+    );
+    if (!farms.length) return null;
+    const freshest = farms.reduce((latest, farm) =>
+      Date.parse(farm.updatedAt) > Date.parse(latest.updatedAt) ? farm : latest,
+    );
+    return {
+      farms: farms.slice(0, maxFarms),
+      blockNumber: freshest.blockNumber,
+      updatedAt: freshest.updatedAt,
+      refreshAfterSeconds: refreshSeconds,
+      sampleMinutes: freshest.sampleMinutes,
+      minimumTvlUsd,
+      catalogSize,
+      databaseBacked: true,
+      source:
+        "Neon pool snapshots · Robinhood Chain · factory-verified V3 pools",
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -525,6 +611,7 @@ async function buildResponse(
   let farms = bases.map((pool) =>
     toOpportunity(pool, blockNumber, sampleMinutes, updatedAt),
   );
+  await persistFarmSnapshots(farms);
   farms = farms.filter(
     (farm) => farm.tvlUsd != null && farm.tvlUsd >= minimumTvlUsd,
   );
@@ -536,14 +623,7 @@ async function buildResponse(
         farm.token1.address.toLowerCase() === normalized,
     );
   }
-  farms.sort((a, b) => {
-    const priced = Number(b.tvlUsd != null) - Number(a.tvlUsd != null);
-    if (priced) return priced;
-    return (
-      (b.volume24hProjectedUsd ?? b.activityScore) -
-      (a.volume24hProjectedUsd ?? a.activityScore)
-    );
-  });
+  sortFarms(farms);
   return {
     farms: farms.slice(0, maxFarms),
     blockNumber: blockNumber.toString(),
@@ -692,6 +772,10 @@ export async function getFarmScanner(token?: string, forceRefresh = false) {
     for (const item of [...activeMatches, ...discovered])
       merged.set(item[0].toLowerCase(), item);
     return buildResponse([...merged.values()], address);
+  }
+  if (!forceRefresh) {
+    const stored = await getStoredFarmScanner();
+    if (stored) return stored;
   }
   if (!forceRefresh && scannerCache && scannerCache.expiresAt > Date.now())
     return scannerCache.value;

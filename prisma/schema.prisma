@@ -153,6 +153,8 @@ model Pool {
   fee         Int
   tickSpacing Int
   codeHash    String?
+  snapshot    Json?
+  snapshotAt  DateTime?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   token0      Token       @relation("PoolToken0", fields: [token0Id], references: [id])
@@ -162,6 +164,7 @@ model Pool {
 
   @@unique([chainId, address])
   @@unique([chainId, token0Id, token1Id, fee])
+  @@index([chainId, snapshotAt])
 }
 
 model Position {

@@ -3,7 +3,7 @@
   "crons": [
     {
       "path": "/api/farms/catalog",
-      "schedule": "17 5 * * *"
+      "schedule": "*/2 * * * *"
     }
   ]
 }
