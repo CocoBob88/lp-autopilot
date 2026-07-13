@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lp_autopilot
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: lp_autopilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - lp_autopilot_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lp_autopilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  lp_autopilot_pg:

@@ -1,0 +1,520 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WalletMode {
+  WATCH_ONLY
+  ASSISTED
+  AUTOPILOT
+}
+
+enum WorkflowStatus {
+  CREATED
+  PLANNED
+  SIMULATED
+  AWAITING_AUTHORIZATION
+  SUBMITTING
+  SUBMITTED
+  CONFIRMING
+  RECONCILIATION_REQUIRED
+  COMPLETED
+  REVERTED
+  FAILED
+  CANCELLED
+}
+
+enum StrategyMode {
+  ALERT_ONLY
+  APPROVAL_REQUIRED
+  AUTOPILOT
+}
+
+enum StrategyKind {
+  RANGE_GUARD
+  AUTO_COMPOUND
+  SCHEDULED_COMPOUND
+  RECENTER
+  ONE_SIDED_EXIT
+  PROFIT_HARVEST
+}
+
+enum BreakerScope {
+  GLOBAL
+  WALLET
+  POSITION
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model User {
+  id             String             @id @default(cuid())
+  primaryAddress String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  wallets        Wallet[]
+  permissions    WalletPermission[]
+  strategies     Strategy[]
+  workflows      Workflow[]
+  alerts         Alert[]
+  authNonces     AuthNonce[]
+}
+
+model AuthNonce {
+  id         String    @id @default(cuid())
+  userId     String?
+  address    String
+  chainId    Int
+  nonceHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([chainId, address, expiresAt])
+}
+
+model Wallet {
+  id                    String             @id @default(cuid())
+  userId                String
+  chainId               Int
+  address               String
+  label                 String?
+  mode                  WalletMode
+  encryptedPrivateKey   String?
+  encryptionVersion     Int?
+  automationEnabled     Boolean            @default(false)
+  executionDisabled     Boolean            @default(false)
+  maxGasPerExecutionWei Decimal?           @db.Decimal(78, 0)
+  maxDailyGasWei        Decimal?           @db.Decimal(78, 0)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissions           WalletPermission[]
+  positions             Position[]
+  nonceLeases           NonceLease[]
+  workflows             Workflow[]
+  circuitBreakers       CircuitBreaker[]
+
+  @@unique([userId, chainId, address])
+  @@index([chainId, address])
+}
+
+model WalletPermission {
+  id         String    @id @default(cuid())
+  userId     String
+  walletId   String
+  chainId    Int
+  address    String
+  permission String
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet     Wallet    @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, walletId, permission])
+  @@index([chainId, address])
+}
+
+model Token {
+  id         String     @id @default(cuid())
+  chainId    Int
+  address    String
+  name       String?
+  symbol     String
+  decimals   Int
+  codeHash   String?
+  behavior   Json?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  pools0     Pool[]     @relation("PoolToken0")
+  pools1     Pool[]     @relation("PoolToken1")
+  positions0 Position[] @relation("PositionToken0")
+  positions1 Position[] @relation("PositionToken1")
+
+  @@unique([chainId, address])
+}
+
+model Pool {
+  id          String      @id @default(cuid())
+  chainId     Int
+  address     String
+  factory     String
+  token0Id    String
+  token1Id    String
+  fee         Int
+  tickSpacing Int
+  codeHash    String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  token0      Token       @relation("PoolToken0", fields: [token0Id], references: [id])
+  token1      Token       @relation("PoolToken1", fields: [token1Id], references: [id])
+  positions   Position[]
+  swaps       SwapEvent[]
+
+  @@unique([chainId, address])
+  @@unique([chainId, token0Id, token1Id, fee])
+}
+
+model Position {
+  id                 String             @id @default(cuid())
+  chainId            Int
+  managerAddress     String
+  tokenId            Decimal            @db.Decimal(78, 0)
+  ownerAddress       String
+  operator           String?
+  walletId           String?
+  poolId             String
+  token0Id           String
+  token1Id           String
+  fee                Int
+  tickLower          Int
+  tickUpper          Int
+  liquidity          Decimal            @db.Decimal(78, 0)
+  tokensOwed0        Decimal            @db.Decimal(78, 0)
+  tokensOwed1        Decimal            @db.Decimal(78, 0)
+  openedAtBlock      Decimal?           @db.Decimal(78, 0)
+  openedAt           DateTime?
+  lastValidatedBlock Decimal?           @db.Decimal(78, 0)
+  closedAt           DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  wallet             Wallet?            @relation(fields: [walletId], references: [id], onDelete: SetNull)
+  pool               Pool               @relation(fields: [poolId], references: [id])
+  token0             Token              @relation("PositionToken0", fields: [token0Id], references: [id])
+  token1             Token              @relation("PositionToken1", fields: [token1Id], references: [id])
+  snapshots          PositionSnapshot[]
+  events             PositionEvent[]
+  strategies         Strategy[]
+  workflows          Workflow[]
+  circuitBreakers    CircuitBreaker[]
+
+  @@unique([chainId, managerAddress, tokenId])
+  @@index([chainId, ownerAddress])
+}
+
+model PositionSnapshot {
+  id            String   @id @default(cuid())
+  positionId    String
+  chainId       Int
+  blockNumber   Decimal  @db.Decimal(78, 0)
+  blockHash     String
+  timestamp     DateTime
+  tick          Int
+  sqrtPriceX96  Decimal  @db.Decimal(78, 0)
+  poolLiquidity Decimal  @db.Decimal(78, 0)
+  liquidity     Decimal  @db.Decimal(78, 0)
+  amount0       Decimal  @db.Decimal(78, 0)
+  amount1       Decimal  @db.Decimal(78, 0)
+  fees0         Decimal  @db.Decimal(78, 0)
+  fees1         Decimal  @db.Decimal(78, 0)
+  position      Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([positionId, blockNumber])
+  @@index([chainId, blockNumber])
+}
+
+model PositionEvent {
+  id              String    @id @default(cuid())
+  positionId      String
+  chainId         Int
+  transactionHash String
+  logIndex        Int
+  blockNumber     Decimal   @db.Decimal(78, 0)
+  blockHash       String
+  eventType       String
+  amount0         Decimal?  @db.Decimal(78, 0)
+  amount1         Decimal?  @db.Decimal(78, 0)
+  liquidityDelta  Decimal?  @db.Decimal(78, 0)
+  gasCostWei      Decimal?  @db.Decimal(78, 0)
+  rawLog          Json
+  decoderVersion  Int       @default(1)
+  timestamp       DateTime?
+  position        Position  @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([chainId, transactionHash, logIndex])
+}
+
+model SwapEvent {
+  id              String    @id @default(cuid())
+  poolId          String
+  chainId         Int
+  transactionHash String
+  logIndex        Int
+  blockNumber     Decimal   @db.Decimal(78, 0)
+  blockHash       String
+  sender          String
+  recipient       String
+  amount0         Decimal   @db.Decimal(78, 0)
+  amount1         Decimal   @db.Decimal(78, 0)
+  sqrtPriceX96    Decimal   @db.Decimal(78, 0)
+  liquidity       Decimal   @db.Decimal(78, 0)
+  tick            Int
+  rawLog          Json
+  decoderVersion  Int       @default(1)
+  timestamp       DateTime?
+  pool            Pool      @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@unique([chainId, transactionHash, logIndex])
+  @@index([poolId, blockNumber])
+}
+
+model Strategy {
+  id                    String              @id @default(cuid())
+  userId                String
+  positionId            String
+  chainId               Int
+  kind                  StrategyKind
+  mode                  StrategyMode
+  enabled               Boolean             @default(false)
+  minFeeThreshold0      Decimal?            @db.Decimal(78, 0)
+  minFeeThreshold1      Decimal?            @db.Decimal(78, 0)
+  rangeWidthBps         Int?
+  triggerDistanceBps    Int?
+  cooldownSeconds       Int
+  maxExecutionsPerDay   Int
+  maxGasPerExecutionWei Decimal             @db.Decimal(78, 0)
+  maxDailyGasWei        Decimal             @db.Decimal(78, 0)
+  maxSlippageBps        Int
+  maxPriceImpactBps     Int
+  minPoolLiquidity      Decimal             @db.Decimal(78, 0)
+  maxQuoteAgeSeconds    Int
+  maxBlockLag           Int
+  minConfirmations      Int
+  allowedOutputAssets   String[]
+  expiresAt             DateTime?
+  lastEvaluatedAt       DateTime?
+  lastExecutedAt        DateTime?
+  nextExecutionAt       DateTime?
+  config                Json
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  user                  User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  position              Position            @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  executions            StrategyExecution[]
+
+  @@index([chainId, enabled, nextExecutionAt])
+}
+
+model StrategyExecution {
+  id              String    @id @default(cuid())
+  strategyId      String
+  chainId         Int
+  workflowId      String?
+  triggerBlock    Decimal   @db.Decimal(78, 0)
+  triggerEvidence Json
+  decision        String
+  gasCostWei      Decimal?  @db.Decimal(78, 0)
+  startedAt       DateTime  @default(now())
+  completedAt     DateTime?
+  errorCode       String?
+  strategy        Strategy  @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  workflow        Workflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+
+  @@index([strategyId, startedAt])
+}
+
+model Workflow {
+  id                 String                  @id @default(cuid())
+  userId             String
+  walletId           String
+  positionId         String?
+  strategyId         String?
+  chainId            Int
+  type               String
+  workflowKey        String
+  requestHash        String
+  status             WorkflowStatus          @default(CREATED)
+  planVersion        Int                     @default(1)
+  quoteBlock         Decimal?                @db.Decimal(78, 0)
+  quoteTimestamp     DateTime?
+  plan               Json?
+  policy             Json?
+  expectedDeltas     Json?
+  actualDeltas       Json?
+  errorCode          String?
+  errorMessage       String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  completedAt        DateTime?
+  user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet             Wallet                  @relation(fields: [walletId], references: [id])
+  position           Position?               @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  steps              WorkflowStep[]
+  submissions        TransactionSubmission[]
+  strategyExecutions StrategyExecution[]
+
+  @@unique([userId, chainId, workflowKey])
+  @@index([chainId, status, updatedAt])
+}
+
+model WorkflowStep {
+  id            String                  @id @default(cuid())
+  workflowId    String
+  ordinal       Int
+  kind          String
+  status        WorkflowStatus          @default(CREATED)
+  requestHash   String
+  target        String?
+  method        String?
+  calldata      String?
+  valueWei      Decimal?                @db.Decimal(78, 0)
+  simulation    Json?
+  expectedDelta Json?
+  actualDelta   Json?
+  errorCode     String?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  workflow      Workflow                @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  submissions   TransactionSubmission[]
+
+  @@unique([workflowId, ordinal])
+}
+
+model TransactionSubmission {
+  id                String                  @id @default(cuid())
+  workflowId        String
+  stepId            String?
+  chainId           Int
+  signerAddress     String
+  nonce             Decimal                 @db.Decimal(78, 0)
+  transactionHash   String
+  replacementForId  String?
+  status            String
+  submittedAt       DateTime                @default(now())
+  receipt           Json?
+  confirmedBlock    Decimal?                @db.Decimal(78, 0)
+  blockHash         String?
+  gasUsed           Decimal?                @db.Decimal(78, 0)
+  effectiveGasPrice Decimal?                @db.Decimal(78, 0)
+  workflow          Workflow                @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  step              WorkflowStep?           @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  replacementFor    TransactionSubmission?  @relation("Replacement", fields: [replacementForId], references: [id])
+  replacements      TransactionSubmission[] @relation("Replacement")
+
+  @@unique([chainId, transactionHash])
+  @@unique([chainId, signerAddress, nonce, transactionHash])
+}
+
+model NonceLease {
+  id         String    @id @default(cuid())
+  walletId   String
+  chainId    Int
+  address    String
+  nonce      Decimal   @db.Decimal(78, 0)
+  ownerToken String    @unique
+  expiresAt  DateTime
+  releasedAt DateTime?
+  createdAt  DateTime  @default(now())
+  wallet     Wallet    @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([chainId, address, nonce])
+  @@index([chainId, address, expiresAt])
+}
+
+model CircuitBreaker {
+  id                  String       @id @default(cuid())
+  chainId             Int
+  scope               BreakerScope
+  walletId            String?
+  positionId          String?
+  active              Boolean      @default(false)
+  consecutiveFailures Int          @default(0)
+  threshold           Int          @default(3)
+  reasonCode          String?
+  activatedAt         DateTime?
+  resetAt             DateTime?
+  resetByUserId       String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  wallet              Wallet?      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  position            Position?    @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@index([chainId, scope, active])
+}
+
+model Alert {
+  id             String        @id @default(cuid())
+  userId         String
+  chainId        Int
+  positionId     String?
+  strategyId     String?
+  type           String
+  severity       AlertSeverity
+  title          String
+  message        String
+  evidence       Json?
+  acknowledgedAt DateTime?
+  deliveredAt    DateTime?
+  deliveryErrors Json?
+  createdAt      DateTime      @default(now())
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, acknowledgedAt, createdAt])
+}
+
+model EventCursor {
+  id                     String   @id @default(cuid())
+  chainId                Int
+  stream                 String
+  contractAddress        String?
+  nextBlock              Decimal  @db.Decimal(78, 0)
+  lastFinalizedBlock     Decimal  @db.Decimal(78, 0)
+  lastFinalizedBlockHash String
+  overlapBlocks          Int      @default(20)
+  decoderVersion         Int      @default(1)
+  updatedAt              DateTime @updatedAt
+
+  @@unique([chainId, stream, contractAddress])
+}
+
+model ContractManifest {
+  id                    String                    @id @default(cuid())
+  chainId               Int
+  name                  String
+  address               String
+  protocol              String
+  version               String?
+  deploymentSource      String
+  explorerUrl           String
+  expectedCodeHash      String?
+  expectedInterfaces    String[]
+  proxyKind             String?
+  implementationAddress String?
+  adminAddress          String?
+  reviewedAtBlock       Decimal?                  @db.Decimal(78, 0)
+  reviewedAt            DateTime?
+  enabled               Boolean                   @default(false)
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  observations          ContractCodeObservation[]
+
+  @@unique([chainId, name])
+  @@unique([chainId, address])
+}
+
+model ContractCodeObservation {
+  id                    String           @id @default(cuid())
+  manifestId            String
+  chainId               Int
+  address               String
+  blockNumber           Decimal          @db.Decimal(78, 0)
+  blockHash             String
+  codeHash              String
+  implementationAddress String?
+  adminAddress          String?
+  matches               Boolean
+  observedAt            DateTime         @default(now())
+  manifest              ContractManifest @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+
+  @@unique([manifestId, blockNumber])
+  @@index([chainId, address, observedAt])
+}
